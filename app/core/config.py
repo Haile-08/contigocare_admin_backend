@@ -349,6 +349,10 @@ class Settings:
         self.LOG_DIR = Path(os.getenv("LOG_DIR", "logs"))
         self.LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
         self.LOG_FORMAT = os.getenv("LOG_FORMAT", "json")  # "json" or "console"
+        # Daily JSONL files are a local convenience. In production the unit's
+        # filesystem is read-only (deploy/systemd) and logs go to stdout →
+        # journald, so file logging is off there — see apply_environment_settings.
+        self.LOG_TO_FILE = parse_bool_from_env("LOG_TO_FILE", True)
 
         # Profiling Configuration (DEBUG only)
         self.PROFILING_DIR = Path(os.getenv("PROFILING_DIR", "/tmp/fastapi_profiles"))
@@ -431,6 +435,7 @@ class Settings:
             Environment.PRODUCTION: {
                 "DEBUG": False,
                 "LOG_LEVEL": "WARNING",
+                "LOG_TO_FILE": False,
                 "RATE_LIMIT_DEFAULT": ["200 per day", "50 per hour"],
             },
             Environment.TEST: {

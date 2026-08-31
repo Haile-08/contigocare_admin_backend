@@ -27,8 +27,25 @@ from app.core.config import (
     settings,
 )
 
-# Ensure log directory exists
-settings.LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+def _open_log_dir() -> bool:
+    """Create the log directory, reporting whether file logging is possible.
+
+    Production runs on a read-only filesystem and ships its logs to journald via
+    stdout, so a missing (or unwritable) log directory is expected there and must
+    never keep the app from starting.
+
+    Returns:
+        bool: True if daily JSONL files can be written, False otherwise.
+    """
+    if not settings.LOG_TO_FILE:
+        return False
+    try:
+        settings.LOG_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"File logging disabled ({settings.LOG_DIR}): {exc}", file=sys.stderr)
+        return False
+    return True
 
 # Context variables for storing request-specific data
 _request_context: ContextVar[Optional[Dict[str, Any]]] = ContextVar("request_context", default=None)
@@ -199,13 +216,17 @@ def setup_logging() -> None:
     # Determine log level based on DEBUG setting
     log_level = logging.DEBUG if settings.DEBUG else logging.INFO
 
-    # Create file handler for JSON logs
-    file_handler = JsonlFileHandler(get_log_file_path())
-    file_handler.setLevel(log_level)
-
-    # Create console handler
+    # Create console handler — always present; in production it is the only one,
+    # and journald picks it up from stdout.
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(log_level)
+    handlers: List[logging.Handler] = [console_handler]
+
+    # Daily JSONL files, only where the filesystem allows it
+    if _open_log_dir():
+        file_handler = JsonlFileHandler(get_log_file_path())
+        file_handler.setLevel(log_level)
+        handlers.insert(0, file_handler)
 
     # Get shared processors
     shared_processors = get_structlog_processors(
@@ -217,7 +238,7 @@ def setup_logging() -> None:
     logging.basicConfig(
         format="%(message)s",
         level=log_level,
-        handlers=[file_handler, console_handler],
+        handlers=handlers,
     )
 
     # Configure structlog based on environment

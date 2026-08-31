@@ -432,6 +432,7 @@ API at all** — better to fail loudly than to boot with no configuration.
 | --- | --- | --- |
 | `Failed to load credential contigocare.env: No such file or directory` | The safe was never created, or it is not at `/etc/credstore.encrypted/contigocare.env` | Do §5.5 |
 | `Failed to decrypt credential` / `Failed to unseal` | The key changed — usually the server was rebuilt, or the host updated the firmware on a TPM machine | Rebuild the safe from the copy in your password manager, with `--tpm2-pcrs=""` this time |
+| `OSError: [Errno 30] Read-only file system: 'logs'` | An old checkout, from before file logging was made optional: the app tried to create `logs/` at import | `cd /opt/contigocare-admin && sudo -u ccadmin git pull && sudo systemctl restart contigocare-admin`. Production sets `LOG_TO_FILE=false`; do not grant a writable path for it — the logs are in the journal |
 
 Logs:
 

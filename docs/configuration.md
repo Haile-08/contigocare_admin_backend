@@ -136,3 +136,5 @@ Only active when `DEBUG=true`. Profiles every request and saves a JSON report wh
 | --- | --- | --- | --- |
 | `LOG_LEVEL` | `DEBUG` | `WARNING` | Log level |
 | `LOG_FORMAT` | `console` | `json` | `console` for coloured dev output, `json` for structured production logs |
+| `LOG_TO_FILE` | `true` | `false` | Daily JSONL files in `LOG_DIR`. Off in production: the unit's filesystem is read-only and logs go to stdout → journald (`journalctl -t contigocare-admin`). Set it explicitly to override; if the directory cannot be created the handler is skipped with a warning on stderr rather than failing startup |
+| `LOG_DIR` | `logs` | — | Where those JSONL files go when `LOG_TO_FILE` is on |
