@@ -1,6 +1,16 @@
 # AI Agent Development Guide
 
-This document provides essential guidelines for AI agents working on this LangGraph FastAPI Agent project.
+Guidelines for AI agents working on the ContigoCare insurance analysis console.
+
+## What this service is
+
+An internal, admin-only tool for analysing **Mexican Gastos Médicos Mayores
+(GMM)** insurance policies. An operator uploads a policy, confirms which
+personal data gets removed, and receives a structured analysis with a citation
+behind every extracted value.
+
+It is not a chatbot. There is no conversation, no session history, and no
+public surface. If you are adding one of those, you are on the wrong branch.
 
 ## Quick Commands
 
@@ -9,215 +19,193 @@ make install              # Install deps (uv sync) + pre-commit hooks
 make dev                  # Dev server with hot reload (port 8000)
 make lint                 # ruff check .
 make format               # ruff format .
-make typecheck            # uv run pyright (static type check)
+make typecheck            # uv run pyright
 make check                # lint + typecheck
-make eval                 # Run LLM evals (interactive)
-make eval-quick           # Run LLM evals (default settings)
-make migrate              # Run DB migrations to latest (Alembic)
-make docker-up            # Docker: API + DB (ENV=development by default)
-make stack-up ENV=development  # Full stack: API + DB + Prometheus + Grafana
+make migrate              # Alembic migrations to latest
+
+# Accounts — the only way one is created
+uv run python scripts/create_admin.py create --email x@contigo.care --name "Name"
+uv run python scripts/create_admin.py list
+uv run python scripts/create_admin.py reset-mfa --email x@contigo.care
+
+# The improvement loop (see docs/agent-improvement.md)
+uv run python evals/build_golden_set.py
+uv run python evals/main.py run
+uv run python evals/main.py compare --variant v1 --variant v2
 ```
 
-> All server/DB/Docker targets accept `ENV=development|staging|production|test`.
-> Run `make help` for the full list of targets.
+## How it is deployed
+
+**There is no Docker.** The service runs directly on an Ubuntu VPS: a systemd
+unit (`deploy/systemd/contigocare-admin.service`) runs the venv's uvicorn on
+`127.0.0.1:8001`, nginx terminates TLS and proxies `/api/…` to it, and
+PostgreSQL is on the same box over localhost. `deploy/README.md` is the full
+build-out; `deploy/update.sh` is the redeploy.
+
+Two consequences worth knowing before you change anything:
+
+- **The unit's filesystem is read-only** (`ProtectSystem=strict`, no writable
+  paths). This is the same guarantee as rule 1 below, enforced by the OS: code
+  that writes a file to disk fails on the server even if it works locally.
+  Scratch space is the private `/tmp`; OCR staging is `/dev/shm`.
+- **Don't reintroduce a Dockerfile or compose file.** System dependencies
+  (Tesseract with `-spa`, PostgreSQL) are installed by `apt` per
+  `deploy/README.md`.
+- **There is no `.env.production` on the server.** The settings are an encrypted
+  systemd credential; `load_env_file()` reads `$CREDENTIALS_DIRECTORY` before any
+  file on disk, and one-off commands (`alembic`, `create_admin.py`) run through
+  `deploy/bin/contigocare-run`. Anything that assumes a readable secrets file, or
+  a `sudo -u ccadmin env APP_ENV=production …` invocation, is broken in
+  production.
 
 ## Project Structure
 
 ```
 app/
-  api/v1/          # Route handlers (auth.py, chatbot.py, api.py)
+  api/v1/
+    auth.py          # Two-step login, enrolment, rotating refresh, password reset
+    insurance.py     # extract -> review -> analyze -> feedback; list + reopen
+    dashboard.py     # Aggregates, computed in the database
   core/
-    config.py      # Pydantic Settings config
-    database.py    # Async DB setup
-    langgraph/     # LangGraph agent graph + tools
-    logging.py     # structlog setup
-    llm.py         # LLM service with retry logic
-    limiter.py     # Rate limiting (slowapi)
-    metrics.py     # Prometheus metrics
-    middleware.py  # ASGI middleware
-    prompts/       # System prompts
-  models/          # SQLModel ORM models
-  schemas/         # Pydantic request/response schemas + graph state
-  services/        # Business logic services
-  utils/           # Shared utilities
-evals/             # LLM evaluation framework (Langfuse-based)
-scripts/           # Environment setup, Docker build scripts
+    config.py        # Settings; refuses weak secrets at startup
+    langgraph/
+      insurance_agent.py   # extract -> verify -> critique
+    prompts/         # Versioned prompt files (extraction_v1.md, …)
+    metrics.py       # Prometheus, including redaction + hallucination counters
+    middleware.py    # Logging context, security headers
+  models/            # admin, refresh_token, analysis
+  schemas/           # insurance.py is the agent's output contract
+  services/
+    redaction.py     # Mexican PII/PHI detector — the compliance boundary
+    document.py      # In-memory parsing + local Tesseract OCR
+    database.py      # Async engine
+    email.py         # The one transactional email: the password reset link
+    llm/gemini.py    # Structured, retried, measured Gemini calls
+  utils/             # auth (JWT), crypto (Fernet), totp
+evals/               # Deterministic offline scoring
+scripts/create_admin.py  # Account provisioning
 ```
 
-## Project Overview
+## The three rules that are not negotiable
 
-This is a production-ready AI agent application built with:
-- **LangGraph** for stateful, multi-step AI agent workflows
-- **FastAPI** for high-performance async REST API endpoints
-- **Langfuse** for LLM observability and tracing
-- **PostgreSQL + pgvector** for long-term memory storage (mem0ai)
-- **JWT authentication** with session management
-- **Prometheus + Grafana** for monitoring
+These encode the product's guarantees. Breaking one is not a style issue.
 
-## Quick Reference: Critical Rules
+### 1. The policy document is never persisted
 
-### Import Rules
-- **All imports MUST be at the top of the file** - never add imports inside functions or classes
+Uploads are parsed in memory and dropped. What may be stored is the
+*post-redaction* text, the structured result, and reviewer feedback — nothing
+else. Specifically, never add: an upload directory, a document cache, a
+LangGraph checkpointer, a vector store of document contents, or SQL echo
+logging.
 
-### Logging Rules
-- Use **structlog** for all logging
-- Log messages must be **lowercase_with_underscores** (e.g., `"user_login_successful"`)
-- **NO f-strings in structlog events** - pass variables as kwargs
-- Use `logger.exception()` instead of `logger.error()` to preserve tracebacks
-- Example: `logger.info("chat_request_received", session_id=session.id, message_count=len(messages))`
+Temp files go to `/dev/shm` (configured once at import in `document.py`). The
+OCR path refuses to run rather than falling back to `/tmp`.
 
-### Retry Rules
-- **Always use tenacity library** for retry logic
-- Configure with exponential backoff
-- Example: `@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))`
+### 2. Nothing reaches the model un-redacted
 
-### Output Rules
-- **Always enable rich library** for formatted console outputs
-- Use rich for progress bars, tables, panels, and formatted text
+`POST /analyze` takes the original text plus *approved spans* and performs the
+redaction server-side, then re-scans the result and refuses the request if a
+blocking category survives. Never accept pre-redacted text from a client: that
+moves the guarantee into the browser.
 
-### Caching Rules
-- **Only cache successful responses**, never cache errors
-- Use appropriate cache TTL based on data volatility
+### 3. There is no registration, and no path to a session with one factor
 
-### FastAPI Rules
-- All routes must have rate limiting decorators
-- Use dependency injection for services, database connections, and auth
-- All database operations must be async
+No signup endpoint and no invite flow. Accounts come from
+`scripts/create_admin.py` writing to the database. Every login is password
+**and** TOTP; a correct password issues a `mfa_challenge` token that reaches the
+MFA endpoints and nothing else.
+
+Password reset by email exists and does not bend this. `/auth/password/reset`
+changes the password and returns **no** access token, refresh cookie or MFA
+challenge — the operator signs in again with both factors. Never add a
+"convenience" session to that response: it would make a compromised mailbox
+equivalent to a compromised account and silently delete the guarantee the rest
+of the auth module is built around. `/auth/password/forgot` must keep answering
+202 with an identical body for every address, or it becomes a staff directory.
 
 ## Code Style Conventions
 
 ### Python/FastAPI
-- Use `async def` for asynchronous operations
-- Use type hints for all function signatures
-- Prefer Pydantic models over raw dictionaries
-- Use functional, declarative programming; avoid classes except for services and agents
-- File naming: lowercase with underscores (e.g., `user_routes.py`)
-- Use the RORO pattern (Receive an Object, Return an Object)
+- **All imports at the top of the file.** Never inside a function or class.
+- `async def` for all I/O. The database engine is async — do not reintroduce a
+  sync session inside an async function.
+- Type hints on every signature. Pydantic models over raw dicts.
+- Handle errors first, early-return, happy path last.
+- `HTTPException` with a Spanish `detail` — the operators are Mexican and the
+  frontend passes server messages through untranslated.
 
-### Error Handling
-- Handle errors at the beginning of functions
-- Use early returns for error conditions
-- Place the happy path last in the function
-- Use guard clauses for preconditions
-- Use `HTTPException` for expected errors with appropriate status codes
+### Logging
+- structlog, event names `lowercase_with_underscores`.
+- **No f-strings in events** — pass values as kwargs.
+- `logger.exception()` over `logger.error()` inside an `except`.
+- **Never log document text, extracted values, or a detected entity's value.**
+  Counts and categories only.
 
-## LangGraph & LangChain Patterns
+### Retries
+- tenacity, exponential backoff. See `services/llm/gemini.py`.
 
-### Graph Structure
-- Use `StateGraph` for building AI agent workflows
-- Define clear state schemas using Pydantic models (see `app/schemas/graph.py`)
-- Use `CompiledStateGraph` for production workflows
-- Implement `AsyncPostgresSaver` for checkpointing and persistence
-- Use `Command` for controlling graph flow between nodes
+### FastAPI
+- Every route carries a rate-limit decorator.
+- Dependency injection for auth: `get_current_admin` for real endpoints,
+  `get_mfa_challenge_admin` for the MFA step only.
 
-### Tracing
-- Use LangChain's `CallbackHandler` from Langfuse for tracing all LLM calls
-- All LLM operations must have Langfuse tracing enabled
+## The agent
 
-### Memory (mem0ai)
-- Use `AsyncMemory` for semantic memory storage
-- Store memories per user_id for personalized experiences
-- Use async methods: `add()`, `get()`, `search()`, `delete()`
+`app/core/langgraph/insurance_agent.py` — three nodes:
 
-## Authentication & Security
+- **extract** — one Gemini call into `AnalisisGMM`.
+- **verify** — *no model call.* Checks in Python that each `evidencia` quote
+  appears in the document; downgrades confidence where it does not.
+- **critique** — runs only when verify found problems, and only once.
 
-- Use JWT tokens for authentication
-- Implement session-based user management (see `app/api/v1/auth.py`)
-- Use `get_current_session` dependency for protected endpoints
-- Store sensitive data in environment variables
-- Validate all user inputs with Pydantic models
+There is **no checkpointer**, deliberately: it would write policy text to
+Postgres. The graph runs once, in memory, per request.
 
-## Database Operations
+Prompts are versioned files. Adding a version means adding
+`extraction_v2.md` and pointing `ANALYSIS_PROMPT_VERSION` at it. Never edit a
+shipped version in place — stored runs reference it.
 
-- Use SQLModel for ORM models (combines SQLAlchemy + Pydantic)
-- Define models in `app/models/` directory
-- Use async database operations with asyncpg
-- Use LangGraph's AsyncPostgresSaver for agent checkpointing
+## Working with Mexican documents
 
-## Performance Guidelines
-
-- Minimize blocking I/O operations
-- Use async for all database and external API calls
-- Implement caching for frequently accessed data
-- Use connection pooling for database connections
-- Optimize LLM calls with streaming responses
-
-## Observability
-
-- Integrate Langfuse for LLM tracing on all agent operations
-- Export Prometheus metrics for API performance
-- Use structured logging with context binding (request_id, session_id, user_id)
-- Track LLM inference duration, token usage, and costs
+- Identifiers to detect: **CURP, RFC, NSS (IMSS), CLABE, clave de elector (INE),
+  lada phone formats, código postal**. Not US SSN/MRN.
+- Domain vocabulary stays Spanish in data fields: `suma asegurada`,
+  `deducible`, `coaseguro`, `tope de coaseguro`, `antigüedad`,
+  `periodo de espera`, `preexistencia`, `tabulador`. Translating these in the
+  extraction layer misstates contractual terms.
+- Scanned carátulas are the norm. OCR is `spa+eng` — insurer names and
+  international-coverage clauses appear in English.
+- **Never redact currency amounts or percentages.** They are the analysis. The
+  detector explicitly protects them; a bare date is only ever *suggested*,
+  because vigencia dates are needed and look exactly like a DOB.
 
 ## Testing & Evaluation
 
-- Implement metric-based evaluations for LLM outputs (see `evals/` directory)
-- Create custom evaluation metrics as markdown files in `evals/metrics/prompts/`
-- Use Langfuse traces for evaluation data sources
-- Generate JSON reports with success rates
-
-## Configuration Management
-
-- Use environment-specific configuration files (`.env.development`, `.env.staging`, `.env.production`)
-- Use Pydantic Settings for type-safe configuration (see `app/core/config.py`)
-- Never hardcode secrets or API keys
-
-## Key Dependencies
-
-- **FastAPI** - Web framework
-- **LangGraph** - Agent workflow orchestration
-- **LangChain** - LLM abstraction and tools
-- **Langfuse** - LLM observability and tracing
-- **Pydantic v2** - Data validation and settings
-- **structlog** - Structured logging
-- **mem0ai** - Long-term memory management
-- **PostgreSQL + pgvector** - Database and vector storage
-- **SQLModel** - ORM for database models
-- **tenacity** - Retry logic
-- **rich** - Terminal formatting
-- **slowapi** - Rate limiting
-- **prometheus-client** - Metrics collection
-
-## 10 Commandments for This Project
-
-1. All routes must have rate limiting decorators
-2. All LLM operations must have Langfuse tracing
-3. All async operations must have proper error handling
-4. All logs must follow structured logging format with lowercase_underscore event names
-5. All retries must use tenacity library
-6. All console outputs should use rich formatting
-7. All caching should only store successful responses
-8. All imports must be at the top of files
-9. All database operations must be async
-10. All endpoints must have proper type hints and Pydantic models
-11. All code must pass `make typecheck` (pyright standard mode)
+Scoring is deterministic — string comparison against reviewer-confirmed values,
+no LLM judge. See `docs/agent-improvement.md` for the full loop. The five rates
+that matter are accuracy, miss, **invention**, grounding, and cost; a change
+that raises accuracy *and* invention is a regression.
 
 ## Common Pitfalls to Avoid
 
-- ❌ Using f-strings in structlog events
-- ❌ Adding imports inside functions
-- ❌ Forgetting rate limiting decorators on routes
-- ❌ Missing Langfuse tracing on LLM calls
-- ❌ Caching error responses
-- ❌ Using `logger.error()` instead of `logger.exception()` for exceptions
-- ❌ Blocking I/O operations without async
-- ❌ Hardcoding secrets or API keys
-- ❌ Missing type hints on function signatures
-
-## When Making Changes
-
-Before modifying code:
-1. Read the existing implementation first
-2. Check for related patterns in the codebase
-3. Ensure consistency with existing code style
-4. Add appropriate logging with structured format
-5. Include error handling with early returns
-6. Add type hints and Pydantic models
-7. Verify Langfuse tracing is enabled for LLM calls
+- ❌ Persisting the uploaded document in any form
+- ❌ Accepting pre-redacted text from the client
+- ❌ Adding a checkpointer, cache, or vector store over document content
+- ❌ Logging extracted values or detected entities
+- ❌ Redacting money or percentages
+- ❌ Editing a shipped prompt version in place
+- ❌ f-strings in structlog events
+- ❌ Imports inside functions
+- ❌ Missing rate-limit decorators
+- ❌ Returning a distinguishable response for a locked vs unknown account
+- ❌ Returning a session (or an MFA challenge) from `/auth/password/reset`
+- ❌ Letting `/auth/password/forgot` reveal whether an address has an account
+- ❌ Logging a reset link, or any email body outside the mail-disabled path
 
 ## References
 
-- LangGraph Documentation: https://langchain-ai.github.io/langgraph/
-- LangChain Documentation: https://python.langchain.com/docs/
-- FastAPI Documentation: https://fastapi.tiangolo.com/
-- Langfuse Documentation: https://langfuse.com/docs
+- LangGraph: https://langchain-ai.github.io/langgraph/
+- FastAPI: https://fastapi.tiangolo.com/
+- Gemini API: https://ai.google.dev/gemini-api/docs
+- `docs/agent-improvement.md` — the improvement loop
+- `docs/authentication.md` — the two-step login in detail

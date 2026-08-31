@@ -1,0 +1,87 @@
+# ContigoCare Admin API — production service.
+# Install as /etc/systemd/system/contigocare-admin.service
+#
+# Assumes the repo IS /opt/contigocare-admin, owned by the dedicated `ccadmin`
+# user (never root, never /root — ProtectHome below makes /root unreachable on
+# purpose). APP_ENV=production is enough: app/core/config.py finds the settings
+# itself, so no login shell or set_env.sh is needed.
+#
+# The secrets do NOT live in the app directory. They are an encrypted systemd
+# credential (LoadCredentialEncrypted= below); see README §5.
+#
+# The venv python is called directly; `uv` is only an install-time tool and is
+# not required at runtime.
+
+[Unit]
+Description=ContigoCare Admin API (production)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+User=ccadmin
+Group=ccadmin
+WorkingDirectory=/opt/contigocare-admin
+Environment=APP_ENV=production
+# The app directory is read-only under the sandbox below, so don't let Python
+# waste syscalls trying to write .pyc files it can never write.
+Environment=PYTHONDONTWRITEBYTECODE=1
+# systemd creates /var/cache/contigocare-admin (writable) and this points any
+# library that wants a cache dir at it instead of the read-only home.
+CacheDirectory=contigocare-admin
+Environment=XDG_CACHE_HOME=/var/cache/contigocare-admin
+
+# --- Secrets --------------------------------------------------------------
+# The production settings are an encrypted credential in the system credential
+# store, not a .env.production in the app directory. systemd decrypts it with
+# the host key (root-only, /var/lib/systemd/credential.secret) and/or the TPM at
+# start, and places the plaintext at $CREDENTIALS_DIRECTORY/contigocare.env —
+# mode 0400, owned by `ccadmin`, on a tmpfs inside THIS unit's mount namespace.
+# It is therefore invisible to every other process on the box, never touches the
+# disk, and is gone the moment the service stops. app/core/config.py reads
+# $CREDENTIALS_DIRECTORY before it looks at any .env file.
+#
+# Create/rotate it with (README §5):
+#   systemd-creds encrypt --name=contigocare.env plain.env \
+#       /etc/credstore.encrypted/contigocare.env
+#
+# The unit REFUSES TO START if the credential is missing or cannot be
+# decrypted — a deliberate fail-closed: no silent boot on partial config.
+LoadCredentialEncrypted=contigocare.env:/etc/credstore.encrypted/contigocare.env
+
+# Port 8001, not 8000, so this can share a box with agent.contigo.care.
+ExecStart=/opt/contigocare-admin/.venv/bin/python -m uvicorn app.main:app \
+    --host 127.0.0.1 --port 8001 \
+    --loop uvloop \
+    --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=always
+RestartSec=5
+
+# Logs go to stdout → journald (rotation and disk cap are journald's job).
+# This tag is how you filter them: `journalctl -t contigocare-admin`.
+SyslogIdentifier=contigocare-admin
+
+# --- Sandboxing -----------------------------------------------------------
+# The filesystem is entirely read-only for this service. That is not caution,
+# it is the product promise: the policy is parsed in memory and never written
+# to disk, so there is no uploads/ or logs/ path to grant. Tesseract's scratch
+# files land in the private /tmp.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectProc=invisible
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

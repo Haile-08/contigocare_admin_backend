@@ -1,135 +1,169 @@
-"""This file contains the authentication schema for the application."""
+"""Request and response shapes for the two-step login.
 
-import re
+There is no registration schema here, and that is deliberate: accounts exist
+only because an operator ran ``scripts/create_admin.py`` against the database.
+The password reset schemas below are not a way around that — they change the
+password on a row that already exists, and the account still cannot be used
+without the TOTP factor.
+"""
+
 from datetime import datetime
+from typing import (
+    List,
+    Optional,
+)
 
 from pydantic import (
     BaseModel,
     EmailStr,
     Field,
-    SecretStr,
-    field_validator,
 )
 
 from app.schemas.base import BaseResponse
 
 
-class Token(BaseModel):
-    """Token model for authentication.
+class LoginRequest(BaseModel):
+    """Step one: email and password.
 
     Attributes:
-        access_token: The JWT access token.
-        token_type: The type of token (always "bearer").
-        expires_at: The token expiration timestamp.
+        email: The account's email.
+        password: The plaintext password. Never logged, never echoed.
     """
 
-    access_token: str = Field(..., description="The JWT access token")
-    token_type: str = Field(default="bearer", description="The type of token")
-    expires_at: datetime = Field(..., description="The token expiration timestamp")
+    email: EmailStr = Field(..., description="Correo del administrador")
+    password: str = Field(..., min_length=1, max_length=200)
 
 
-class TokenResponse(BaseResponse):
-    """Response model for login endpoint.
+class LoginChallengeResponse(BaseResponse):
+    """Step one's answer: a correct password buys a challenge, not a session.
 
     Attributes:
-        access_token: The JWT access token
-        token_type: The type of token (always "bearer")
-        expires_at: When the token expires
+        mfa_token: Short-lived token that authorises the MFA endpoints only.
+        expires_at: When the challenge dies.
+        enrollment_required: True on a first login, when the account has no
+            confirmed authenticator yet. The frontend shows the QR screen
+            instead of the code prompt.
     """
 
-    access_token: str = Field(..., description="The JWT access token")
-    token_type: str = Field(default="bearer", description="The type of token")
-    expires_at: datetime = Field(..., description="When the token expires")
+    mfa_token: str
+    expires_at: datetime
+    enrollment_required: bool
 
 
-class UserCreate(BaseModel):
-    """Request model for user registration.
+class EnrollmentStartResponse(BaseResponse):
+    """The secret to put into Google Authenticator.
 
     Attributes:
-        email: User's email address
-        password: User's password
-        username: Optional display name
+        secret: The base32 seed, shown so it can be typed if the QR fails.
+        otpauth_uri: What the QR encodes.
+        qr_svg: A server-rendered QR code. Rendered here so the seed never has
+            to be handed to a third-party QR service.
     """
 
-    email: EmailStr = Field(..., description="User's email address")
-    password: SecretStr = Field(..., description="User's password", min_length=8, max_length=64)
-    username: str | None = Field(default=None, description="Optional display name", max_length=50)
-
-    @field_validator("password")
-    @classmethod
-    def validate_password(cls, v: SecretStr) -> SecretStr:
-        """Validate password strength.
-
-        Args:
-            v: The password to validate
-
-        Returns:
-            SecretStr: The validated password
-
-        Raises:
-            ValueError: If the password is not strong enough
-        """
-        password = v.get_secret_value()
-
-        # Check for common password requirements
-        if len(password) < 8:
-            raise ValueError("Password must be at least 8 characters long")
-
-        if not re.search(r"[A-Z]", password):
-            raise ValueError("Password must contain at least one uppercase letter")
-
-        if not re.search(r"[a-z]", password):
-            raise ValueError("Password must contain at least one lowercase letter")
-
-        if not re.search(r"[0-9]", password):
-            raise ValueError("Password must contain at least one number")
-
-        if not re.search(r'[!@#$%^&*(),.?":{}|<>]', password):
-            raise ValueError("Password must contain at least one special character")
-
-        return v
+    secret: str
+    otpauth_uri: str
+    qr_svg: str
 
 
-class UserResponse(BaseResponse):
-    """Response model for user operations.
+class MfaVerifyRequest(BaseModel):
+    """A code from the authenticator app.
 
     Attributes:
-        id: User's ID
-        email: User's email address
-        username: Optional display name
-        token: Authentication token
+        code: Six digits. Accepts spaces and dashes; they are stripped.
     """
 
-    id: int = Field(..., description="User's ID")
-    email: str = Field(..., description="User's email address")
-    username: str | None = Field(default=None, description="Optional display name")
-    token: Token = Field(..., description="Authentication token")
+    code: str = Field(..., min_length=4, max_length=16)
+
+
+class RecoveryLoginRequest(BaseModel):
+    """A backup code, for when the phone is gone.
+
+    Attributes:
+        recovery_code: One of the codes issued at enrolment. Single use.
+    """
+
+    recovery_code: str = Field(..., min_length=8, max_length=32)
+
+
+class PasswordResetRequest(BaseModel):
+    """Step one of a reset: which account.
+
+    Attributes:
+        email: The address to send the link to. Whether an account exists at it
+            is never revealed by the response.
+    """
+
+    email: EmailStr = Field(..., description="Correo del administrador")
+
+
+class PasswordResetConfirmRequest(BaseModel):
+    """Step two: the token from the link, and the new password.
+
+    Attributes:
+        token: The single-use token from the emailed link.
+        new_password: The replacement password. Checked against the same policy
+            ``scripts/create_admin.py`` applies — one policy, stated in
+            ``utils/sanitization.py`` and enforced everywhere a password is set.
+    """
+
+    token: str = Field(..., min_length=16, max_length=256)
+    new_password: str = Field(..., min_length=1, max_length=200)
+
+
+class PasswordResetAcceptedResponse(BaseResponse):
+    """The deliberately uninformative answer to a reset request.
+
+    Attributes:
+        detail: The same sentence for a known address, an unknown one, and a
+            disabled account. Anything else turns this endpoint into a way to
+            ask "does this person work here?".
+    """
+
+    detail: str
 
 
 class SessionResponse(BaseResponse):
-    """Response model for session creation.
+    """A completed sign-in.
+
+    The refresh token is absent by design — it is set as an HttpOnly cookie and
+    is never readable by JavaScript, which is the entire point of putting it
+    there.
 
     Attributes:
-        session_id: The unique identifier for the chat session
-        name: Name of the session (defaults to empty string)
-        token: The authentication token for the session
+        access_token: Short-lived bearer token, held in memory by the client.
+        token_type: Always ``bearer``.
+        expires_at: Absolute expiry.
+        expires_in: Seconds until expiry, so the client's refresh timer does not
+            depend on the browser clock agreeing with the server's.
+        admin: Who signed in.
+        recovery_codes: Present exactly once, in the response that completes
+            enrolment. Never retrievable afterwards.
     """
 
-    session_id: str = Field(..., description="The unique identifier for the chat session")
-    name: str = Field(default="", description="Name of the session", max_length=100)
-    token: Token = Field(..., description="The authentication token for the session")
+    access_token: str
+    token_type: str = "bearer"
+    expires_at: datetime
+    expires_in: int
+    admin: "AdminProfile"
+    recovery_codes: Optional[List[str]] = None
 
-    @field_validator("name")
-    @classmethod
-    def sanitize_name(cls, v: str) -> str:
-        """Sanitize the session name.
 
-        Args:
-            v: The name to sanitize
+class AdminProfile(BaseResponse):
+    """The signed-in operator, as the console displays them.
 
-        Returns:
-            str: The sanitized name
-        """
-        # Remove any potentially harmful characters
-        sanitized = re.sub(r'[<>{}[\]()\'"`]', "", v)
-        return sanitized
+    Attributes:
+        id: Account id.
+        email: Login identity.
+        full_name: Display name.
+        mfa_enrolled: Whether an authenticator is confirmed.
+        last_login_at: Previous sign-in, for the "welcome back" line.
+    """
+
+    id: str
+    email: str
+    full_name: str
+    mfa_enrolled: bool
+    last_login_at: Optional[datetime] = None
+
+
+SessionResponse.model_rebuild()

@@ -1,21 +1,45 @@
 """This file contains the schemas for the application."""
 
-from app.schemas.auth import Token
-from app.schemas.base import BaseResponse
-from app.schemas.chat import (
-    ChatRequest,
-    ChatResponse,
-    Message,
-    StreamResponse,
+from app.schemas.auth import (
+    AdminProfile,
+    EnrollmentStartResponse,
+    LoginChallengeResponse,
+    LoginRequest,
+    MfaVerifyRequest,
+    RecoveryLoginRequest,
+    SessionResponse,
 )
-from app.schemas.graph import GraphState
+from app.schemas.base import BaseResponse
+from app.schemas.insurance import (
+    AnalisisGMM,
+    AnalysisSummary,
+    AnalyzeRequest,
+    AnalyzeResponse,
+    Campo,
+    Confianza,
+    DashboardResponse,
+    ExtractResponse,
+    FeedbackRequest,
+    Severidad,
+)
 
 __all__ = [
-    "Token",
+    "AdminProfile",
+    "AnalisisGMM",
+    "AnalysisSummary",
+    "AnalyzeRequest",
+    "AnalyzeResponse",
     "BaseResponse",
-    "ChatRequest",
-    "ChatResponse",
-    "Message",
-    "StreamResponse",
-    "GraphState",
+    "Campo",
+    "Confianza",
+    "DashboardResponse",
+    "EnrollmentStartResponse",
+    "ExtractResponse",
+    "FeedbackRequest",
+    "LoginChallengeResponse",
+    "LoginRequest",
+    "MfaVerifyRequest",
+    "RecoveryLoginRequest",
+    "Severidad",
+    "SessionResponse",
 ]

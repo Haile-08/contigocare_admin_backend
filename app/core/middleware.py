@@ -11,10 +11,6 @@ from typing import (
 
 from asgi_correlation_id import correlation_id
 from fastapi import Request
-from jose import (
-    JWTError,
-    jwt,
-)
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
@@ -27,6 +23,10 @@ from app.core.logging import (
 from app.core.metrics import (
     http_request_duration_seconds,
     http_requests_total,
+)
+from app.utils.auth import (
+    TokenType,
+    decode_token,
 )
 
 if TYPE_CHECKING:
@@ -80,11 +80,16 @@ class MetricsMiddleware(BaseHTTPMiddleware):
 
 
 class LoggingContextMiddleware(BaseHTTPMiddleware):
-    """Middleware for adding user_id and session_id to logging context."""
+    """Adds the calling admin's id to every log line for a request.
+
+    Reads the token without enforcing it — an invalid token is the auth
+    dependency's problem, not this middleware's. The point is only that logs
+    from a request can be attributed once the request has been identified.
+    """
 
     @override
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        """Extract user_id and session_id from authenticated requests and add to logging context.
+        """Bind the admin id from the bearer token, if there is a valid one.
 
         Args:
             request: The incoming request
@@ -94,43 +99,69 @@ class LoggingContextMiddleware(BaseHTTPMiddleware):
             Response: The response from the application
         """
         try:
-            # Clear any existing context from previous requests
+            # Clear any context left over from a previous request on this task.
             clear_context()
 
-            # Extract token from Authorization header
             auth_header = request.headers.get("authorization")
-            if auth_header and auth_header.startswith("Bearer "):
-                token = auth_header.split(" ")[1]
+            if auth_header and auth_header.lower().startswith("bearer "):
+                token = auth_header.split(" ", 1)[1]
+                # Full verification, including audience, issuer and token type.
+                # A challenge token deliberately does not identify a session
+                # here — it has not finished authenticating.
+                claims = decode_token(token, TokenType.ACCESS)
+                if claims is not None:
+                    bind_context(admin_id=claims.subject)
 
-                try:
-                    # Decode token to get session_id (stored in "sub" claim)
-                    payload = jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM])
-                    session_id = payload.get("sub")
-
-                    if session_id:
-                        # Bind session_id to logging context
-                        bind_context(session_id=session_id)
-
-                        # Try to get user_id from request state after authentication
-                        # This will be set by the dependency injection if the endpoint uses authentication
-                        # We'll check after the request is processed
-
-                except JWTError:
-                    # Token is invalid, but don't fail the request - let the auth dependency handle it
-                    pass
-
-            # Process the request
-            response = await call_next(request)
-
-            # After request processing, check if user info was added to request state
-            if hasattr(request.state, "user_id"):
-                bind_context(user_id=request.state.user_id)
-
-            return response
+            return await call_next(request)
 
         finally:
-            # Always clear context after request is complete to avoid leaking to other requests
+            # Always clear, so context cannot leak into the next request.
             clear_context()
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Applies the response headers a browser needs to defend the console.
+
+    This is a JSON API with no HTML surface of its own, so the headers are the
+    restrictive set: a CSP that permits nothing, because nothing should ever be
+    rendered from an API response, and `nosniff` so a JSON body cannot be
+    coaxed into executing as script.
+
+    `Cache-Control: no-store` is the one that matters most here. Analysis
+    responses carry policy contents, and a proxy or browser cache holding them
+    would be a copy of data this service promises not to keep.
+    """
+
+    @override
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        """Attach security headers to every response.
+
+        Args:
+            request: The incoming request
+            call_next: The next middleware or route handler
+
+        Returns:
+            Response: The response, with headers added.
+        """
+        response = await call_next(request)
+
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+        )
+        response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+        response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+        response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+        response.headers["Pragma"] = "no-cache"
+
+        if settings.COOKIE_SECURE:
+            # Two years, so the domain stays on the HSTS preload list's minimum.
+            response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+
+        return response
 
 
 class ProfilingMiddleware(BaseHTTPMiddleware):

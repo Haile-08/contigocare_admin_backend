@@ -2,45 +2,44 @@
 
 ## Prerequisites
 
+Everything runs directly on the machine — there are no containers, in
+development or in production.
+
 - Python 3.13+
 - [uv](https://docs.astral.sh/uv/) — `pip install uv`
-- Docker + Docker Compose (recommended for local dev)
-- OpenAI API key
+- PostgreSQL 16, reachable on localhost
+- Tesseract with the Spanish pack — scanned policies are OCR'd locally:
+  `sudo apt install tesseract-ocr tesseract-ocr-spa tesseract-ocr-eng`
+- A `GEMINI_API_KEY`
 - Langfuse account (optional — set `LANGFUSE_TRACING_ENABLED=false` to skip)
 
-## Option A: Docker (recommended)
-
-The fastest way to get running. One command starts the API and PostgreSQL with pgvector.
+## Setup
 
 ```bash
-git clone <repo-url> my-agent
-cd my-agent
-
-# Copy and fill in your env file
-cp .env.example .env.development
-# Required: OPENAI_API_KEY, JWT_SECRET_KEY
-# Optional: LANGFUSE_* keys (or set LANGFUSE_TRACING_ENABLED=false)
-
-make install       # installs Python deps + pre-commit hooks
-make docker-up     # starts API (port 8000) + PostgreSQL
-make docker-migrate # runs Alembic migrations inside the app container
-```
-
-Open [http://localhost:8000/docs](http://localhost:8000/docs).
-
-## Option B: Local Python
-
-```bash
-git clone <repo-url> my-agent
-cd my-agent
+git clone <repo-url> contigocare_admin_backend
+cd contigocare_admin_backend
 
 cp .env.example .env.development
-# Fill in: OPENAI_API_KEY, JWT_SECRET_KEY, POSTGRES_* (point to your DB)
+# Fill in: GEMINI_API_KEY, JWT_SECRET_KEY, ENCRYPTION_KEY, POSTGRES_* (your local DB)
 
 make install       # installs deps + pre-commit hooks
 make migrate       # creates tables via Alembic
 make dev           # starts server with hot reload on port 8000
 ```
+
+Create the local database once, before `make migrate`:
+
+```bash
+sudo -u postgres psql <<'SQL'
+CREATE USER ccadmin WITH PASSWORD 'localdev';
+CREATE DATABASE contigocare OWNER ccadmin;
+SQL
+```
+
+Open [http://localhost:8000/docs](http://localhost:8000/docs).
+
+Deploying to the server is a different document:
+[`deploy/README.md`](../deploy/README.md).
 
 ## Your first API call
 
@@ -105,13 +104,10 @@ Hooks include: trailing whitespace, YAML/TOML/JSON validation, secret detection,
 ## Troubleshooting
 
 **Database connection error on startup**
-Make sure PostgreSQL is running and `POSTGRES_*` vars in your `.env` match. With Docker: `make docker-up` handles this (including migrations).
-
-**`could not translate host name "db"`**
-`POSTGRES_HOST=db` only resolves *inside* the Docker network (it's the Compose
-service name). If you run a command on your host (e.g. `make migrate` or `make dev`
-in the local-Python flow), set `POSTGRES_HOST=localhost` instead — the DB's port is
-published to the host via `docker-compose.yml`. Inside the container, keep `db`.
+Make sure PostgreSQL is running (`systemctl status postgresql`) and the
+`POSTGRES_*` vars in `.env.development` match the role and database you created.
+`POSTGRES_HOST` is `localhost` everywhere — there is no container network to
+resolve a service name against.
 
 **`detect-secrets` blocking a commit**
 If it's a false positive, add `# pragma: allowlist secret` to the end of the flagged line.

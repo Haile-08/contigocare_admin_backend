@@ -5,15 +5,16 @@ stay in sync with the running app configuration.
 """
 
 from logging.config import fileConfig
+from urllib.parse import quote_plus
 
 from sqlalchemy import engine_from_config, pool
 from sqlmodel import SQLModel
 
 from alembic import context
 from app.core.config import settings
-from app.models.session import Session  # noqa: F401
-from app.models.thread import Thread  # noqa: F401
-from app.models.user import User  # noqa: F401
+# Importing the package registers every table on SQLModel.metadata. A model
+# missing from `app/models/__init__.py` is invisible to autogenerate.
+import app.models  # noqa: F401
 
 # Alembic Config object
 config = context.config
@@ -22,9 +23,12 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Build the database URL from app settings
+# Build the database URL from app settings. Migrations run on psycopg3 in sync
+# mode — the same driver the app uses async, since psycopg2 went with the sync
+# engine. A bare `postgresql://` here would resolve to psycopg2 and fail to import.
 DATABASE_URL = (
-    f"postgresql://{settings.POSTGRES_USER}:{settings.POSTGRES_PASSWORD}"
+    "postgresql+psycopg://"
+    f"{quote_plus(settings.POSTGRES_USER)}:{quote_plus(settings.POSTGRES_PASSWORD)}"
     f"@{settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}"
 )
 config.set_main_option("sqlalchemy.url", DATABASE_URL)
@@ -32,16 +36,10 @@ config.set_main_option("sqlalchemy.url", DATABASE_URL)
 # Point Alembic at our SQLModel metadata for autogenerate support
 target_metadata = SQLModel.metadata
 
-# Tables managed by external systems (LangGraph checkpointer, mem0, pgvector)
-# that Alembic should never touch.
-EXCLUDE_TABLES = {
-    "checkpoint_blobs",
-    "checkpoint_writes",
-    "checkpoint_migrations",
-    "checkpoints",
-    "longterm_memory",
-    "mem0migrations",
-}
+# Nothing external writes to this database any more: the analysis agent is
+# stateless and holds no checkpointer, and long-term memory was removed. The set
+# is kept, empty, so a future external table has an obvious place to be declared.
+EXCLUDE_TABLES: set[str] = set()
 
 
 def include_object(object, name, type_, reflected, compare_to):

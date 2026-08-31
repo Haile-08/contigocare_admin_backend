@@ -1,0 +1,87 @@
+#!/bin/bash
+# Run a one-off backend command with the production secrets attached.
+#
+# Install as /usr/local/sbin/contigocare-run (root, mode 0750). See README §5.
+#
+# The production settings are an encrypted systemd credential, not a file on
+# disk, so `sudo -u ccadmin env APP_ENV=production …` no longer sees them:
+# there is nothing for the app to read. This wrapper launches the command as a
+# transient systemd service with the SAME credential, user, sandbox-relevant
+# environment and working directory as contigocare-admin.service, so alembic
+# and create_admin.py get exactly the configuration the API itself runs with.
+#
+#   contigocare-run .venv/bin/alembic upgrade head
+#   contigocare-run .venv/bin/python scripts/create_admin.py list
+#
+# The plaintext never reaches this shell, never lands in the environment of a
+# process root can see with `ps`, and never appears in shell history. Run it as
+# root — decrypting the credential needs the root-only host key.
+
+set -euo pipefail
+
+CREDENTIAL_NAME=contigocare.env
+CREDENTIAL_PATH=/etc/credstore.encrypted/contigocare.env
+APP_DIR=/opt/contigocare-admin
+
+if [[ $# -eq 0 ]]; then
+    echo "usage: ${0##*/} <command> [args...]" >&2
+    echo "example: ${0##*/} .venv/bin/alembic upgrade head" >&2
+    exit 64
+fi
+
+if [[ $EUID -ne 0 ]]; then
+    echo "${0##*/}: must run as root — the credential host key is root-only" >&2
+    exit 77
+fi
+
+if [[ ! -f $CREDENTIAL_PATH ]]; then
+    echo "${0##*/}: $CREDENTIAL_PATH is missing — the secrets were never installed (README §5)" >&2
+    exit 78
+fi
+
+# systemd-run needs an ABSOLUTE path for the command. It resolves a bare name
+# against $PATH, NOT against --working-directory, so `.venv/bin/alembic` would
+# fail with "Failed to find executable". Resolve the first word here so the
+# documented short form keeps working. Only the first word needs it: later
+# arguments (`scripts/create_admin.py`) are read by the program itself, which
+# does run inside $APP_DIR.
+command_path=$1
+shift
+if [[ $command_path != /* ]]; then
+    if [[ -x $APP_DIR/$command_path ]]; then
+        command_path=$APP_DIR/$command_path
+    elif resolved=$(command -v -- "$command_path" 2>/dev/null); then
+        command_path=$resolved
+    else
+        echo "${0##*/}: cannot find '$command_path' in $APP_DIR or on PATH" >&2
+        exit 127
+    fi
+fi
+
+if [[ ! -x $command_path ]]; then
+    echo "${0##*/}: '$command_path' is not executable" >&2
+    exit 126
+fi
+
+# --pty when a terminal is attached, so `create_admin.py create` can show the
+# enrolment QR code and prompt; --pipe when there is not (a cron job, a
+# pipeline), so stdout stays clean and the exit status still propagates.
+if [[ -t 0 && -t 1 ]]; then
+    io_mode=--pty
+else
+    io_mode=--pipe
+fi
+
+exec systemd-run \
+    --quiet --collect "$io_mode" \
+    --unit="contigocare-run-$$" \
+    --description="ContigoCare one-off: $*" \
+    --working-directory="$APP_DIR" \
+    --property=User=ccadmin \
+    --property=Group=ccadmin \
+    --property=Environment=APP_ENV=production \
+    --property=Environment=PYTHONDONTWRITEBYTECODE=1 \
+    --property=CacheDirectory=contigocare-admin \
+    --property=Environment=XDG_CACHE_HOME=/var/cache/contigocare-admin \
+    --property=LoadCredentialEncrypted="$CREDENTIAL_NAME:$CREDENTIAL_PATH" \
+    -- "$command_path" "$@"

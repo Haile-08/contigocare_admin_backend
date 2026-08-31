@@ -1,0 +1,4 @@
+# Golden sets are built from production feedback with build_golden_set.py.
+# They contain only redacted text, but they are still policy content and there
+# is no reason for them to live in git — rebuild them instead.
+*.jsonl

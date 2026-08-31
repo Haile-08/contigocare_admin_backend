@@ -1,6 +1,17 @@
-"""LLM package: registry of available models and the service that calls them."""
+"""LLM package: the Gemini client used by the insurance analysis agent."""
 
-from app.services.llm.registry import LLMRegistry
-from app.services.llm.service import LLMService, llm_service
+from app.services.llm.gemini import (
+    GeminiService,
+    ModelBlockedError,
+    ModelCallError,
+    ModelResult,
+    gemini_service,
+)
 
-__all__ = ["LLMRegistry", "LLMService", "llm_service"]
+__all__ = [
+    "GeminiService",
+    "ModelBlockedError",
+    "ModelCallError",
+    "ModelResult",
+    "gemini_service",
+]

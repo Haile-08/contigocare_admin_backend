@@ -1,45 +1,55 @@
 [project]
-name = "langgraph-fastapi-template"
-version = "0.1.0"
-description = "LangGraph FastAPI Template"
+name = "contigocare-admin-backend"
+version = "2.0.0"
+description = "ContigoCare insurance policy analysis console — admin API"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    # Web
     "fastapi>=0.121.0",
+    "uvicorn>=0.34.0",
+    "python-multipart>=0.0.20",
+    "slowapi>=0.1.9",
+    "asgi-correlation-id>=4.3.4",
+    "uvloop>=0.22.1; platform_system != 'Windows'",
+    # Agent + model. langchain-google-genai replaces langchain-openai; the agent
+    # talks to Gemini only.
     "langchain>=1.0.5",
     "langchain-core>=1.0.4",
-    "langchain-openai>=1.0.2",
-    "langfuse==3.9.1",
+    "langchain-google-genai>=2.1.0",
     "langgraph>=1.0.2",
-    "langgraph-checkpoint-postgres>=3.0.1",
-    "passlib[bcrypt]>=1.7.4",
-    "psycopg[binary]>=3.3.2",
-    "psycopg2-binary>=2.9.10",
-    "pydantic[email]>=2.11.1",
-    "pydantic-settings>=2.8.1",
-    "python-dotenv>=1.1.0",
-    "python-jose[cryptography]>=3.4.0",
-    "python-multipart>=0.0.20",
+    "langfuse==3.9.1",
+    "tenacity>=9.1.2",
+    # Persistence. psycopg3 in async mode; psycopg2 is gone with the sync engine.
     "sqlmodel>=0.0.25",
-    "structlog>=25.2.0",
-    "supabase>=2.15.0",
-    "uvicorn>=0.34.0",
+    "psycopg[binary,pool]>=3.3.2",
+    "alembic>=1.18.4",
+    # Auth. pyotp + qrcode drive Google Authenticator enrolment; cryptography
+    # encrypts the TOTP seed at rest.
+    "python-jose[cryptography]>=3.4.0",
     "bcrypt>=4.3.0",
-    "slowapi>=0.1.9",
+    "cryptography>=44.0.0",
+    "pyotp>=2.9.0",
+    "qrcode>=8.0",
+    # Password-reset mail. stdlib smtplib is synchronous and would block the
+    # event loop for the length of an SMTP conversation — which is a network
+    # round trip to a third party, not a local call.
+    "aiosmtplib>=5.1.2",
+    # Document intake. pypdfium2 is permissively licensed (unlike PyMuPDF's
+    # AGPL) and both extracts text and rasterises pages for OCR, so there is no
+    # separate poppler dependency.
+    "pypdfium2>=4.30.0",
+    "pytesseract>=0.3.13",
+    "pillow>=11.0.0",
+    # Shared
+    "pydantic[email]>=2.11.1",
     "email-validator>=2.2.0",
+    "python-dotenv>=1.1.0",
+    "structlog>=25.2.0",
     "prometheus-client>=0.19.0",
     "starlette-prometheus>=0.7.0",
-    "asgiref>=3.8.1",
-    "duckduckgo-search>=3.9.0",
-    "langchain-community>=0.4.1",
     "tqdm>=4.67.1",
     "colorama>=0.4.6",
-    "ddgs>=9.6.0",
-    "tenacity>=9.1.2",
-    "mem0ai>=1.0.0",
-    "uvloop>=0.22.1; platform_system != 'Windows'",
-    "asgi-correlation-id>=4.3.4",
-    "alembic>=1.18.4",
 ]
 
 [project.optional-dependencies]

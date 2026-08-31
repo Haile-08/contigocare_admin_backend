@@ -1,210 +1,209 @@
-# FastAPI LangGraph Agent Template
+# ContigoCare Admin — Insurance Analysis API
 
-A production-ready template for building AI agent backends with FastAPI and LangGraph. Handles the hard parts — stateful conversations, long-term memory, tool calling, observability, rate limiting, auth — so you can focus on your agent logic.
+An internal tool for analysing **Mexican Gastos Médicos Mayores (GMM)**
+insurance policies. An operator uploads a policy, confirms which personal data
+is removed, and gets back a structured analysis with a citation behind every
+extracted value.
 
-**Built for AI engineers** who want a solid foundation, not a tutorial project.
+Three properties shape the whole design:
 
----
+1. **The policy is never stored.** It is parsed in memory, redacted, sent, and
+   dropped. No upload directory, no cache, no checkpointer.
+2. **Nothing reaches the model un-redacted.** A detector finds Mexican
+   identifiers, an operator confirms, and the server re-scans what it was given
+   before it calls anything.
+3. **Every answer is cited.** Each extracted value carries a verbatim quote,
+   and a Python check — not a model — verifies the quote is really in the
+   document.
 
-## Powered by Atlas Cloud — Drop-in LLM Backend for LangGraph Agents
-
-<div align="center">
-  <a href="https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=fastapi-langgraph-agent-production-ready-template">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/atlas-cloud-logo-dark.png"/>
-      <img src="docs/atlas-cloud-logo.png" alt="Atlas Cloud" width="200"/>
-    </picture>
-  </a>
-</div>
-
-[**Atlas Cloud**](https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=fastapi-langgraph-agent-production-ready-template) provides an **OpenAI-compatible LLM API** that integrates seamlessly into this FastAPI + LangGraph template — no code changes to your agent graph needed. Just swap `OPENAI_BASE_URL` and `OPENAI_API_KEY` to access **DeepSeek, Qwen, GLM, Kimi, MiniMax, Gemini, Claude, GPT** and more through a single unified endpoint.
-
-The `LLMRegistry` in this template uses `langchain_openai.ChatOpenAI` — Atlas Cloud is wire-compatible, so you get instant access to 130+ curated models without touching any LangGraph logic.
-
-### Quick Setup
-
-**Step 1 — Get your free API key:** [atlascloud.ai/console/coding-plan](https://www.atlascloud.ai/console/coding-plan)
-
-**Step 2 — Update `.env.development`:**
-
-```env
-OPENAI_API_KEY=<your-atlascloud-key>
-OPENAI_BASE_URL=https://api.atlascloud.ai/v1
-DEFAULT_LLM_MODEL=deepseek-ai/deepseek-v4-pro
-```
-
-**Step 3 — Or use directly in code:**
-
-```python
-from langchain_openai import ChatOpenAI
-
-llm = ChatOpenAI(
-    model="deepseek-ai/deepseek-v4-pro",
-    openai_api_base="https://api.atlascloud.ai/v1",
-    openai_api_key="<your-atlascloud-key>",
-    max_tokens=512,  # reasoning model requires max_tokens >= 512
-)
-```
-
-This works as a drop-in replacement anywhere `ChatOpenAI` is used in your LangGraph agent — including the `LLMRegistry`, the circular fallback service, and mem0 long-term memory.
-
-<details>
-<summary>📋 Model catalog — a current selection (136 available in total)</summary>
-
-| Model ID | Provider |
-|---|---|
-| `openai/gpt-5.6-luna` | OpenAI |
-| `openai/gpt-5.6-sol` | OpenAI |
-| `openai/gpt-5.6-terra` | OpenAI |
-| `openai/gpt-5.5` | OpenAI |
-| `openai/gpt-5.4` | OpenAI |
-| `openai/gpt-5.4-mini` | OpenAI |
-| `openai/gpt-5.4-nano` | OpenAI |
-| `openai/gpt-5.3-codex` | OpenAI |
-| `openai/gpt-5.2` | OpenAI |
-| `anthropic/claude-opus-5` | Anthropic |
-| `anthropic/claude-sonnet-5` | Anthropic |
-| `anthropic/claude-opus-4.8` | Anthropic |
-| `anthropic/claude-sonnet-4.6` | Anthropic |
-| `anthropic/claude-haiku-4.5-20251001` | Anthropic |
-| `google/gemini-3.5-flash` | Google |
-| `google/gemini-3.1-pro-preview` | Google |
-| `google/gemini-3.1-flash-lite` | Google |
-| `google/gemini-2.5-pro` | Google |
-| `deepseek-ai/deepseek-v4-pro` | DeepSeek |
-| `deepseek-ai/deepseek-v4-flash` | DeepSeek |
-| `qwen/qwen3.8-max` | Alibaba Qwen |
-| `qwen/qwen3.7-plus` | Alibaba Qwen |
-| `qwen/qwen3.5-plus` | Alibaba Qwen |
-| `moonshotai/kimi-k3` | Moonshot AI |
-| `moonshotai/kimi-k2.7-code` | Moonshot AI |
-| `zai-org/glm-5.2` | Zhipu AI |
-| `zai-org/glm-5.1` | Zhipu AI |
-| `zai-org/glm-5` | Zhipu AI |
-| `minimaxai/minimax-m3` | MiniMax |
-| `minimaxai/minimax-m2.7` | MiniMax |
-| `xai/grok-4.6` | xAI |
-| `xai/grok-4.5` | xAI |
-| `bytedance/doubao-seed-2.1-pro-260628` | ByteDance |
-| `xiaomi/mimo-v2.5-pro` | Xiaomi |
-| `tencent/hy3` | Tencent |
-
-[View live model list →](https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=fastapi-langgraph-agent-production-ready-template)
-
-</details>
+Health data is a *dato personal sensible* under the LFPDPPP, so the redaction
+step is the compliance story, not hygiene.
 
 ---
 
-## What's included
-
-- **LangGraph** stateful agent with checkpointing, tool calling, and human-in-the-loop support
-- **Long-term memory** via mem0 + pgvector — semantic search per user, cache-backed
-- **LLM service** with circular model fallback, exponential backoff retries, and total timeout budget
-- **Langfuse** tracing on all LLM calls; Prometheus metrics + Grafana dashboards
-- **JWT auth** with session management; rate limiting via slowapi
-- **Alembic** migrations; optional Valkey/Redis cache layer
-- **Structured logging** with request/session/user context on every line
-
-## Quickstart
+## Getting started
 
 ```bash
-git clone <repo-url> my-agent && cd my-agent
-cp .env.example .env.development   # fill in your keys
 make install
-make docker-up                     # starts API + PostgreSQL
+cp .env.example .env.development     # then fill in the two required secrets
+make migrate
+make dev                             # http://localhost:8000
 ```
 
-Open [http://localhost:8000/docs](http://localhost:8000/docs) to see the interactive API.
+Two secrets have no safe default and the app refuses to start without them:
 
-> For local development without Docker see [docs/getting-started.md](docs/getting-started.md).
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(48))"                       # JWT_SECRET_KEY
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"  # ENCRYPTION_KEY
+```
+
+You also need a `GEMINI_API_KEY`, and **Tesseract with the Spanish language
+pack** for scanned documents:
+
+```bash
+sudo apt-get install tesseract-ocr tesseract-ocr-spa tesseract-ocr-eng
+```
+
+Without `tesseract-ocr-spa` the extraction silently degrades on scanned
+carátulas, which is the common case.
+
+### Create the first account
+
+There is no registration endpoint. Accounts are created directly:
+
+```bash
+uv run python scripts/create_admin.py create \
+  --email ops@contigo.care --name "Ana Ruiz"
+```
+
+The new account has no authenticator. On first sign-in the console shows a QR
+code, the operator scans it with Google Authenticator, and the recovery codes
+are displayed **once**.
+
+---
+
+## The analysis flow
+
+```
+POST /api/v1/insurance/extract     multipart file
+     │  parse in memory · OCR scans locally · detect identifiers
+     └─▶ { text, spans[], page_count, ocr_page_count }        nothing stored
+
+              ── operator reviews and confirms in the console ──
+
+POST /api/v1/insurance/analyze     text + approved_spans
+     │  redact server-side · re-scan · refuse if identifiers survive
+     │  extract ─▶ verify ─▶ critique   (LangGraph, no checkpointer)
+     └─▶ { analysis_id, result, model_name, prompt_version, latency_ms }
+
+POST /api/v1/insurance/analyses/{id}/feedback    the reviewer's verdict
+     └─ posting again replaces it; a reviewer can revise their own review
+
+GET  /api/v1/insurance/analyses                  the policy list (paged, filterable)
+GET  /api/v1/insurance/analyses/{id}             one run: result, redacted text, verdict
+```
+
+The server is **stateless between the two calls**. Holding the extracted text in
+a cache keyed by a draft id would be more convenient and would quietly turn "the
+policy is never stored" into "the policy is stored for five minutes". The
+browser holds it; the operator is authorised to read the document they just
+uploaded.
+
+Because the client returns the text, the client is not trusted: `/analyze` takes
+the *original text plus approved spans* and performs the redaction itself, then
+re-scans. A tampered client can only make the redaction weaker in ways the gate
+then refuses.
+
+---
+
+## The agent
+
+`extract → verify → critique`, and the interesting node contains no model call.
+
+**`verify`** checks in ordinary Python that every `evidencia` quote actually
+appears in the document, and downgrades the confidence of any field that fails.
+That single deterministic check catches the failure that matters most — a
+confidently stated deducible that is nowhere in the policy — without asking the
+model to grade its own homework and without spending a token. Asking an LLM "are
+you sure?" gets you a model that says yes; checking whether the quote exists
+gets you the truth.
+
+**`critique`** runs only when verification found something, and runs once. Past
+the first pass the model starts rewriting fields that were already right.
+
+There is deliberately **no checkpointer** — it would write policy text into
+Postgres, which is exactly what this service promises not to do.
+
+---
+
+## Making it better
+
+The improvement loop is wired and documented in
+**[`docs/agent-improvement.md`](docs/agent-improvement.md)**. In short: every
+analysis an operator reviews becomes a labelled example, and
+`evals/build_golden_set.py` turns those into a regression suite.
+
+```bash
+uv run python evals/build_golden_set.py
+uv run python evals/main.py compare --variant v1 --variant v2
+```
+
+Scoring is deterministic — string comparison against reviewer-confirmed values,
+not an LLM judge. Five rates are reported, and the one to watch is **invention**:
+a change that raises accuracy *and* invention has made the tool more dangerous,
+not better.
+
+---
+
+## Authentication
+
+Password, then Google Authenticator, every time. A correct password buys a
+five-minute `mfa_challenge` token that reaches the MFA endpoints and nothing
+else. Access tokens live 15 minutes in browser memory; the refresh token is an
+opaque value in an `HttpOnly` cookie, rotated on every use, with family-wide
+revocation on reuse detection.
+
+Full detail — including TOTP replay prevention and the enumeration-resistant
+login — in **[`docs/authentication.md`](docs/authentication.md)**.
+
+---
+
+## Configuration
+
+Everything is environment-driven; see `.env.example`. The settings worth
+knowing:
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `GEMINI_MODEL` | `gemini-3.5-flash` | Paired with `GEMINI_FALLBACK_MODEL` (`gemini-3.5-flash-lite`). One-line switch, but run the eval loop after changing it. |
+| `ANALYSIS_PROMPT_VERSION` | `v1` | Selects `app/core/prompts/extraction_<v>.md`. Stored on every run. |
+| `ANALYSIS_SELF_CRITIQUE_ENABLED` | `true` | The repair pass. Roughly doubles cost on documents that need it. |
+| `REDACTION_ENFORCE_ON_SUBMIT` | `true` | The server-side gate. Turn off only with a very good reason. |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | `15` | The token lives in memory, so this is the XSS blast radius. |
+| `MAX_PDF_PAGES` | `60` | OCR is ~1–3s per scanned page. |
+
+Production additionally refuses to start with `ALLOWED_ORIGINS=*`,
+`COOKIE_SECURE=false`, or a missing `GEMINI_API_KEY`.
+
+---
+
+## Operations
+
+There are no containers. The service runs on a VPS as a systemd unit behind
+nginx, with PostgreSQL on the same box over localhost —
+**[`deploy/README.md`](deploy/README.md)** is the whole setup, and
+`deploy/update.sh` is the redeploy.
+
+```bash
+make check                                   # ruff + pyright  (locally)
+sudo /opt/contigocare-admin/deploy/update.sh # deploy          (on the server)
+journalctl -t contigocare-admin -f           # logs            (on the server)
+```
+
+Two Prometheus counters are security signals rather than performance ones:
+
+- **`redaction_blocked_total`** — submissions refused for residual identifiers.
+  Rising means the detector is missing patterns or operators are clicking
+  through the review. Either way it needs a human.
+- **`analysis_evidence_failures_total`** — fields citing passages not in the
+  document. This is hallucination measured directly, and it is the earliest
+  warning that a prompt or model change made the agent worse.
+
+---
 
 ## Documentation
 
-| Guide | What it covers |
-|---|---|
-| [Getting Started](docs/getting-started.md) | Prerequisites, local setup, first API call |
-| [Architecture](docs/architecture.md) | System design, request flow, component diagrams |
-| [Configuration](docs/configuration.md) | All environment variables with defaults |
-| [Authentication](docs/authentication.md) | JWT flow, sessions, endpoint reference |
-| [Database & Migrations](docs/database.md) | Schema, Alembic migrations, pgvector |
-| [LLM Service](docs/llm-service.md) | Models, retries, fallback, timeout budget |
-| [Memory](docs/memory.md) | mem0 long-term memory, cache layer |
-| [Observability](docs/observability.md) | Langfuse, structured logging, Prometheus, profiling |
-| [Evaluation](docs/evaluation.md) | Eval framework, custom metrics, reports |
-| [Docker](docs/docker.md) | Docker, Compose, full monitoring stack |
-
-## Project structure
-
-```
-app/
-  api/v1/          # Route handlers
-  core/
-    langgraph/     # Agent graph + tools
-    prompts/       # System prompt template
-    cache.py       # Valkey/Redis + in-memory fallback
-    config.py      # Settings
-    middleware.py  # Metrics, logging context, profiling
-    limiter.py     # Rate limiting
-  models/          # SQLModel ORM models
-  schemas/         # Pydantic request/response schemas
-  services/        # LLM, database, memory services
-alembic/           # Database migrations
-evals/             # LLM evaluation framework
-```
-
-## Contributing
-
-PRs welcome. Please read [docs/getting-started.md](docs/getting-started.md) to get your environment set up, then follow the coding conventions in [AGENTS.md](AGENTS.md).
-
-Report security issues privately — see [SECURITY.md](SECURITY.md).
+| | |
+| --- | --- |
+| [`docs/agent-improvement.md`](docs/agent-improvement.md) | The improvement loop, metrics and playbook |
+| [`docs/authentication.md`](docs/authentication.md) | Two-step login, tokens, TOTP |
+| [`docs/architecture.md`](docs/architecture.md) | Request flow and layering |
+| [`docs/configuration.md`](docs/configuration.md) | Every setting |
+| [`docs/database.md`](docs/database.md) | Schema and migrations |
+| [`deploy/README.md`](deploy/README.md) | The VPS: nginx, systemd, TLS, backups |
+| [`docs/observability.md`](docs/observability.md) | Metrics, logs, tracing |
+| [`AGENTS.md`](AGENTS.md) | Conventions for agents working in this repo |
 
 ## License
 
 See [LICENSE](LICENSE).
-
-## FAQ
-
-### General
-
-**What is this template?**
-A production-ready foundation for AI agent backends built on FastAPI + LangGraph. It bundles the components you'd otherwise wire up by hand: stateful conversations, long-term memory, tool calling, observability, rate limiting, and JWT auth.
-
-**How does this differ from a basic LangGraph setup?**
-The base LangGraph quickstart stops at "agent runs locally". This template adds Alembic migrations, mem0 + pgvector long-term memory, Langfuse tracing, Prometheus + Grafana dashboards, JWT sessions, slowapi rate limiting, structured logging with per-request context, and a circular-fallback LLM service — production concerns you'd otherwise build separately.
-
-### Setup & Configuration
-
-**Do I need Docker?**
-Recommended but not required. `make docker-up` starts the API + PostgreSQL together. For local-only setup see [docs/getting-started.md](docs/getting-started.md).
-
-**Which LLM providers are supported?**
-Today: **OpenAI only** via the `LLMRegistry` in `app/services/llm/registry.py`. Multi-provider support (Anthropic, Google, OpenRouter) via LangChain's `init_chat_model` is planned — see [#51](https://github.com/wassim249/fastapi-langgraph-agent-production-ready-template/issues/51). Configure your model via `DEFAULT_LLM_MODEL` in `.env.development`.
-
-**How do I configure long-term memory?**
-Long-term memory is self-hosted: mem0 runs in-process and persists into your existing PostgreSQL via pgvector — there is no separate mem0 cloud account or API key. You only need a working `OPENAI_API_KEY` (used for fact extraction + embeddings) and the pgvector extension enabled. See [docs/memory.md](docs/memory.md) for details.
-
-### Development
-
-**How do I add a custom tool?**
-Drop a LangChain `@tool`-decorated function in `app/core/langgraph/tools/` and register it in the `tools` list exported from that package. The agent picks it up on next start; no graph changes needed.
-
-**How does the LLM service handle failures?**
-Two layers: (1) per-call exponential-backoff retry via `tenacity`, (2) **circular fallback** — if the active model exhausts its retries, the service rotates to the next model in `LLMRegistry` and continues. A total timeout budget caps the whole call so latency stays bounded. See [docs/llm-service.md](docs/llm-service.md).
-
-**Can I use this without Langfuse?**
-Yes. Set `LANGFUSE_TRACING_ENABLED=false` (or omit the Langfuse keys). The agent runs unchanged; structured logs still capture request/session/user context.
-
-### Troubleshooting
-
-**The API won't start**
-- Ensure PostgreSQL is running (`make docker-up` brings it up alongside the API)
-- Confirm `.env.development` exists — copy from `.env.example` and fill in required keys
-- Apply migrations: `make migrate`
-
-**Memory / semantic search returns nothing**
-- Verify the `pgvector` extension is enabled in your PostgreSQL instance
-- Confirm `OPENAI_API_KEY` is valid (mem0 calls OpenAI for fact extraction + embeddings)
-- Check `LONG_TERM_MEMORY_MODEL` and `LONG_TERM_MEMORY_EMBEDDER_MODEL` are set in `.env.development`
-
-**Rate limiting is too aggressive**
-Limits are defined in `app/core/limiter.py` (slowapi). Adjust per-route decorators or the default rate in that file. See [docs/configuration.md](docs/configuration.md) for the related env vars.

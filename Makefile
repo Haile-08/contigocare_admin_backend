@@ -1,27 +1,12 @@
 .DEFAULT_GOAL := help
 
-DOCKER_COMPOSE ?= docker-compose
 ENV            ?= development
-VALID_ENVS     := development staging production test
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-define check_env
-	@if ! echo "$(VALID_ENVS)" | grep -qw "$(ENV)"; then \
-		echo "Invalid ENV=$(ENV). Must be one of: $(VALID_ENVS)"; exit 1; \
-	fi
-endef
-
-define load_env_file
-	$(call check_env)
-	@ENV_FILE=.env.$(ENV); \
-	if [ ! -f $$ENV_FILE ]; then \
-		echo "Environment file $$ENV_FILE not found. Please create it."; exit 1; \
-	fi
-endef
-
-# Shorthand: source env vars then run a command
+# Shorthand: source env vars then run a command. set_env.sh validates ENV and
+# refuses to continue if .env.$(ENV) is missing or a required secret is weak.
 run_with_env = bash -c "source scripts/set_env.sh $(ENV) && $(1)"
 
 # ---------------------------------------------------------------------------
@@ -69,13 +54,19 @@ migrate-history:
 # Evaluation
 # ---------------------------------------------------------------------------
 eval:
-	@$(call run_with_env,python -m evals.main --interactive)
+	@$(call run_with_env,python -m evals.main run)
 
-eval-quick:
-	@$(call run_with_env,python -m evals.main --quick)
+eval-compare:
+	@$(call run_with_env,python -m evals.main compare --variant v1 --variant v2)
 
-eval-no-report:
-	@$(call run_with_env,python -m evals.main --no-report)
+golden-set:
+	@$(call run_with_env,python -m evals.build_golden_set)
+
+create-admin:
+	@$(call run_with_env,python scripts/create_admin.py create --email "$(EMAIL)" --name "$(NAME)")
+
+list-admins:
+	@$(call run_with_env,python scripts/create_admin.py list)
 
 # ---------------------------------------------------------------------------
 # Code quality
@@ -97,56 +88,6 @@ pre-commit:
 
 pre-commit-update:
 	uv run pre-commit autoupdate
-
-# ---------------------------------------------------------------------------
-# Docker — single service (API + DB)
-# ---------------------------------------------------------------------------
-docker-build:
-	$(call check_env)
-	@./scripts/build-docker.sh $(ENV)
-
-docker-up:
-	$(call load_env_file)
-	@APP_ENV=$(ENV) $(DOCKER_COMPOSE) --env-file .env.$(ENV) up -d --build db app
-
-docker-down:
-	$(call load_env_file)
-	@APP_ENV=$(ENV) $(DOCKER_COMPOSE) --env-file .env.$(ENV) down
-
-docker-logs:
-	$(call load_env_file)
-	@APP_ENV=$(ENV) $(DOCKER_COMPOSE) --env-file .env.$(ENV) logs -f app db
-
-# Run Alembic migrations inside the running app container (where "db" resolves).
-# Requires the stack to be up first (make docker-up).
-docker-migrate:
-	$(call load_env_file)
-	@APP_ENV=$(ENV) $(DOCKER_COMPOSE) --env-file .env.$(ENV) exec -T app /app/.venv/bin/alembic upgrade head
-
-# Roll back the last migration inside the running app container.
-docker-migrate-downgrade:
-	$(call load_env_file)
-	@APP_ENV=$(ENV) $(DOCKER_COMPOSE) --env-file .env.$(ENV) exec -T app /app/.venv/bin/alembic downgrade -1
-
-# Show migration history inside the running app container.
-docker-migrate-history:
-	$(call load_env_file)
-	@APP_ENV=$(ENV) $(DOCKER_COMPOSE) --env-file .env.$(ENV) exec -T app /app/.venv/bin/alembic history --verbose
-
-# ---------------------------------------------------------------------------
-# Docker — full stack (API + DB + Prometheus + Grafana)
-# ---------------------------------------------------------------------------
-stack-up:
-	$(call load_env_file)
-	@APP_ENV=$(ENV) $(DOCKER_COMPOSE) --env-file .env.$(ENV) up -d
-
-stack-down:
-	$(call load_env_file)
-	@APP_ENV=$(ENV) $(DOCKER_COMPOSE) --env-file .env.$(ENV) down
-
-stack-logs:
-	$(call load_env_file)
-	@APP_ENV=$(ENV) $(DOCKER_COMPOSE) --env-file .env.$(ENV) logs -f
 
 # ---------------------------------------------------------------------------
 # Misc
@@ -175,9 +116,11 @@ help:
 	@echo "  migrate-history      Show migration history"
 	@echo ""
 	@echo "Evaluation:"
-	@echo "  eval                 Run evals (interactive)"
-	@echo "  eval-quick           Run evals (default settings)"
-	@echo "  eval-no-report       Run evals without report"
+	@echo "  eval                 Score the agent against the golden set"
+	@echo "  eval-compare         Compare two prompt versions"
+	@echo "  golden-set           Rebuild the golden set from reviewer feedback"
+	@echo "  create-admin         Create an admin (EMAIL=... NAME=...)"
+	@echo "  list-admins          List admin accounts"
 	@echo ""
 	@echo "Code quality:"
 	@echo "  lint                 Ruff lint check"
@@ -187,28 +130,14 @@ help:
 	@echo "  pre-commit           Run all pre-commit hooks"
 	@echo "  pre-commit-update    Update pre-commit hook versions"
 	@echo ""
-	@echo "Docker (API + DB):"
-	@echo "  docker-build         Build Docker image"
-	@echo "  docker-up            Start API + DB containers"
-	@echo "  docker-down          Stop containers"
-	@echo "  docker-logs          Tail container logs"
-	@echo "  docker-migrate       Run migrations inside the app container"
-	@echo "  docker-migrate-downgrade  Roll back last migration (in container)"
-	@echo "  docker-migrate-history    Show migration history (in container)"
-	@echo ""
-	@echo "Docker (full stack — includes Prometheus + Grafana):"
-	@echo "  stack-up             Start entire stack"
-	@echo "  stack-down           Stop entire stack"
-	@echo "  stack-logs           Tail all service logs"
+	@echo "Deployment:"
+	@echo "  See deploy/README.md — the VPS runs the app under systemd behind nginx."
 	@echo ""
 	@echo "Misc:"
 	@echo "  clean                Remove .venv, __pycache__, .pytest_cache"
 
 .PHONY: install dev staging prod _serve \
         migrate migration migrate-downgrade migrate-history \
-        eval eval-quick eval-no-report \
+        eval eval-compare golden-set create-admin list-admins \
         lint format typecheck check pre-commit pre-commit-update \
-        docker-build docker-up docker-down docker-logs docker-migrate \
-        docker-migrate-downgrade docker-migrate-history \
-        stack-up stack-down stack-logs \
         clean help

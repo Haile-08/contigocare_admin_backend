@@ -18,7 +18,6 @@ from slowapi.errors import RateLimitExceeded
 from asgi_correlation_id import CorrelationIdMiddleware
 
 from app.api.v1.api import api_router
-from app.api.v1.chatbot import agent
 from app.core.cache import cache_service
 from app.core.config import settings
 from app.core.limiter import limiter
@@ -28,10 +27,10 @@ from app.core.middleware import (
     LoggingContextMiddleware,
     MetricsMiddleware,
     ProfilingMiddleware,
+    SecurityHeadersMiddleware,
 )
 from app.core.observability import langfuse_init
 from app.services.database import database_service
-from app.services.memory import memory_service
 
 # Load environment variables
 load_dotenv()
@@ -46,36 +45,39 @@ async def lifespan(app: FastAPI):
         project_name=settings.PROJECT_NAME,
         version=settings.VERSION,
         api_prefix=settings.API_V1_STR,
+        model=settings.GEMINI_MODEL,
+        prompt_version=settings.ANALYSIS_PROMPT_VERSION,
     )
 
-    # Initialize cache service (connects to Valkey if configured)
     try:
         await cache_service.initialize()
     except Exception as e:
         logger.exception("cache_initialization_failed", error=str(e))
 
-    # Pre-warm the LangGraph agent: create graph + connection pool at startup
-    # to avoid cold-start latency on the first request
+    # Compiling the graph at startup keeps the first analysis of the day from
+    # paying for it. There is no connection pool to warm — the agent is
+    # stateless and holds no checkpointer.
     try:
-        await agent.create_graph()
-        logger.info("graph_pre_warmed")
-    except Exception as e:
-        logger.exception("graph_pre_warm_failed", error=str(e))
+        from app.core.langgraph import insurance_agent
 
-    # Pre-warm mem0 AsyncMemory: initializes pgvector connection and schema check
-    # so the first search() cache miss or add() doesn't pay the ~130ms cold-init cost
-    try:
-        await memory_service.initialize()
+        _ = insurance_agent.graph
+        logger.info("analysis_graph_compiled")
     except Exception as e:
-        logger.exception("memory_service_pre_warm_failed", error=str(e))
+        logger.exception("analysis_graph_compile_failed", error=str(e))
+
+    # Sweep refresh tokens that expired over a week ago. Cheap, and it keeps the
+    # table from growing without bound in a long-lived deployment.
+    try:
+        purged = await database_service.purge_expired_tokens()
+        if purged:
+            logger.info("expired_refresh_tokens_purged", count=purged)
+    except Exception as e:
+        logger.warning("refresh_token_purge_failed", error=str(e))
 
     yield
 
-    # Cleanup on shutdown
     await cache_service.close()
-    if agent._connection_pool:
-        await agent._connection_pool.close()
-        logger.info("connection_pool_closed")
+    await database_service.close()
     logger.info("application_shutdown")
 
 
@@ -83,32 +85,30 @@ app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.VERSION,
     description=settings.DESCRIPTION,
-    openapi_url=f"{settings.API_V1_STR}/openapi.json",
+    # The schema is useful in development and is an attack-surface map in
+    # production, where this is an internal tool with a known client.
+    openapi_url=f"{settings.API_V1_STR}/openapi.json" if settings.DEBUG else None,
+    docs_url="/docs" if settings.DEBUG else None,
+    redoc_url="/redoc" if settings.DEBUG else None,
     lifespan=lifespan,
 )
 
-# Set up Prometheus metrics
 setup_metrics(app)
 
-# Add logging context middleware (must be added before other middleware to capture context)
 app.add_middleware(LoggingContextMiddleware)
-
-# Add custom metrics middleware
 app.add_middleware(MetricsMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
 
-# Add profiling middleware (DEBUG only — saves HTML to /tmp on slow requests)
 if settings.DEBUG:
     app.add_middleware(ProfilingMiddleware)
 
-# Add correlation ID middleware — must be outermost so request_id is set before all others
+# Outermost, so request_id exists before anything else logs.
 app.add_middleware(CorrelationIdMiddleware)
 
-# Set up rate limiter exception handler
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # pyright: ignore[reportArgumentType]
 
 
-# Add validation exception handler
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """Handle validation errors from request data.
@@ -120,36 +120,43 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     Returns:
         JSONResponse: A formatted error response
     """
-    # Log the validation error
     logger.error(
         "validation_error",
         client_host=request.client.host if request.client else "unknown",
         path=request.url.path,
-        errors=str(exc.errors()),
+        error_count=len(exc.errors()),
     )
 
-    # Format the errors to be more user-friendly
-    formatted_errors = []
-    for error in exc.errors():
-        loc = " -> ".join([str(loc_part) for loc_part in error["loc"] if loc_part != "body"])
-        formatted_errors.append({"field": loc, "message": error["msg"]})
+    # Field names and messages only. The default handler echoes the submitted
+    # value back in `input`, and on this service that value can be a fragment of
+    # a policy — which would put document content into an error body and,
+    # through it, into whatever logs that body.
+    formatted_errors = [
+        {
+            "field": " -> ".join(str(part) for part in error["loc"] if part != "body"),
+            "message": error["msg"],
+        }
+        for error in exc.errors()
+    ]
 
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        content={"detail": "Validation error", "errors": formatted_errors},
+        content={"detail": "Error de validación", "errors": formatted_errors},
     )
 
 
-# Set up CORS middleware
+# CORS. `allow_credentials` is required for the refresh cookie to be sent, and
+# the spec forbids pairing it with a wildcard origin — so the origins are named
+# explicitly and production refuses to start with `*` (see `Settings`).
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", settings.CSRF_HEADER_NAME],
+    max_age=600,
 )
 
-# Include API router
 app.include_router(api_router, prefix=settings.API_V1_STR)
 
 
@@ -157,14 +164,10 @@ app.include_router(api_router, prefix=settings.API_V1_STR)
 @limiter.limit(settings.RATE_LIMIT_ENDPOINTS["root"][0])
 async def root(request: Request):
     """Root endpoint returning basic API information."""
-    logger.info("root_endpoint_called")
     return {
         "name": settings.PROJECT_NAME,
         "version": settings.VERSION,
         "status": "healthy",
-        "environment": settings.ENVIRONMENT.value,
-        "swagger_url": "/docs",
-        "redoc_url": "/redoc",
     }
 
 
@@ -177,9 +180,6 @@ async def health_check(request: Request) -> JSONResponse:
         JSONResponse: Health status payload, with HTTP 503 when the
         database is unreachable so load balancers can drop the instance.
     """
-    logger.info("health_check_called")
-
-    # Check database connectivity
     db_healthy = await database_service.health_check()
 
     response = {
@@ -190,7 +190,6 @@ async def health_check(request: Request) -> JSONResponse:
         "timestamp": datetime.now().isoformat(),
     }
 
-    # If DB is unhealthy, set the appropriate status code
     status_code = status.HTTP_200_OK if db_healthy else status.HTTP_503_SERVICE_UNAVAILABLE
 
     return JSONResponse(content=response, status_code=status_code)

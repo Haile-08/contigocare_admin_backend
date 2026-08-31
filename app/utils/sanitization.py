@@ -1,127 +1,97 @@
-"""This file contains the sanitization utilities for the application."""
+"""Input normalisation and policy checks.
 
-import html
+The previous version of this module HTML-escaped every string on the way in.
+That is the wrong layer and, on this service, actively destructive: escaping is
+an *output* concern that belongs where a value is rendered, and a policy
+document full of ``&`` and ``<`` would arrive at the model as ``&amp;`` and
+``&lt;`` — corrupted before it was ever analysed. The frontend is React, which
+escapes on render; the API returns JSON, which has its own encoding. Neither
+needs this.
+
+What is left is what is genuinely needed: normalising an email so two spellings
+of one account cannot both exist, keeping control characters out of stored
+text, and stating the password policy in one place.
+"""
+
 import re
-from typing import (
-    Any,
-    Dict,
-    List,
-)
+import unicodedata
+
+# Matches the C0/C1 control range, minus tab, newline and carriage return, which
+# are legitimate in extracted document text.
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+_EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
+
+# Long enough that the length is doing the work. Complexity rules mostly produce
+# `Password1!`; length is what actually costs an attacker.
+MIN_PASSWORD_LENGTH = 12
+MAX_PASSWORD_BYTES = 72  # bcrypt's hard input limit
 
 
-def sanitize_string(value: str) -> str:
-    """Sanitize a string to prevent XSS and other injection attacks.
-
-    Args:
-        value: The string to sanitize
-
-    Returns:
-        str: The sanitized string
-    """
-    # Convert to string if not already
-    if not isinstance(value, str):
-        value = str(value)
-
-    # HTML escape to prevent XSS
-    value = html.escape(value)
-
-    # Remove any script tags that might have been escaped
-    value = re.sub(r"&lt;script.*?&gt;.*?&lt;/script&gt;", "", value, flags=re.DOTALL)
-
-    # Remove null bytes
-    value = value.replace("\0", "")
-
-    return value
-
-
-def sanitize_email(email: str) -> str:
-    """Sanitize an email address.
+def strip_control_characters(value: str) -> str:
+    """Remove control characters that have no business in stored text.
 
     Args:
-        email: The email address to sanitize
+        value: The string to clean.
 
     Returns:
-        str: The sanitized email address
+        str: The string without control characters.
     """
-    # Basic sanitization
-    email = sanitize_string(email)
-
-    # Ensure email format (simple check)
-    if not re.match(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", email):
-        raise ValueError("Invalid email format")
-
-    return email.lower()
+    return _CONTROL_CHARS.sub("", value)
 
 
-def sanitize_dict(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Recursively sanitize all string values in a dictionary.
+def normalize_email(email: str) -> str:
+    """Normalise and validate an email address.
+
+    Unicode-normalised first: without NFKC, two visually identical addresses can
+    be different byte strings, and the unique index would happily hold both.
 
     Args:
-        data: The dictionary to sanitize
+        email: The address to normalise.
 
     Returns:
-        Dict[str, Any]: The sanitized dictionary
+        str: The lowercased, trimmed address.
+
+    Raises:
+        ValueError: If the address is not a plausible email.
     """
-    sanitized = {}
-    for key, value in data.items():
-        if isinstance(value, str):
-            sanitized[key] = sanitize_string(value)
-        elif isinstance(value, dict):
-            sanitized[key] = sanitize_dict(value)
-        elif isinstance(value, list):
-            sanitized[key] = sanitize_list(value)
-        else:
-            sanitized[key] = value
-    return sanitized
+    cleaned = unicodedata.normalize("NFKC", email).strip().lower()
+    cleaned = strip_control_characters(cleaned)
 
+    if len(cleaned) > 254 or not _EMAIL_RE.match(cleaned):
+        raise ValueError("Formato de correo inválido")
 
-def sanitize_list(data: List[Any]) -> List[Any]:
-    """Recursively sanitize all string values in a list.
-
-    Args:
-        data: The list to sanitize
-
-    Returns:
-        List[Any]: The sanitized list
-    """
-    sanitized = []
-    for item in data:
-        if isinstance(item, str):
-            sanitized.append(sanitize_string(item))
-        elif isinstance(item, dict):
-            sanitized.append(sanitize_dict(item))
-        elif isinstance(item, list):
-            sanitized.append(sanitize_list(item))
-        else:
-            sanitized.append(item)
-    return sanitized
+    return cleaned
 
 
 def validate_password_strength(password: str) -> bool:
-    """Validate password strength.
+    """Check a password against the account policy.
 
     Args:
-        password: The password to validate
+        password: The candidate password.
 
     Returns:
-        bool: Whether the password is strong enough
+        bool: True when acceptable.
 
     Raises:
-        ValueError: If the password is not strong enough with reason
+        ValueError: With a specific reason when it is not.
     """
-    if len(password) < 8:
-        raise ValueError("Password must be at least 8 characters long")
+    if len(password.encode("utf-8")) > MAX_PASSWORD_BYTES:
+        raise ValueError(
+            f"La contraseña no debe exceder {MAX_PASSWORD_BYTES} bytes; "
+            "bcrypt ignoraría el resto de los caracteres"
+        )
 
-    if not re.search(r"[A-Z]", password):
-        raise ValueError("Password must contain at least one uppercase letter")
+    if len(password) < MIN_PASSWORD_LENGTH:
+        raise ValueError(f"La contraseña debe tener al menos {MIN_PASSWORD_LENGTH} caracteres")
 
-    if not re.search(r"[a-z]", password):
-        raise ValueError("Password must contain at least one lowercase letter")
+    if not re.search(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]", password):
+        raise ValueError("La contraseña debe contener al menos una letra")
 
-    if not re.search(r"[0-9]", password):
-        raise ValueError("Password must contain at least one number")
+    if not re.search(r"\d", password):
+        raise ValueError("La contraseña debe contener al menos un número")
 
-    if not re.search(r'[!@#$%^&*(),.?":{}|<>]', password):
-        raise ValueError("Password must contain at least one special character")
+    if password.lower() in {"contrasena123", "password1234", "administrador1", "contigocare1"}:
+        raise ValueError("La contraseña es demasiado común")
 
     return True

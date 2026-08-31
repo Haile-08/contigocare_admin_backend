@@ -1,267 +1,227 @@
 #!/usr/bin/env python3
-"""Command-line interface for running evaluations."""
+"""CLI for the insurance analysis evaluation harness.
+
+    # Score the current configuration
+    uv run python evals/main.py run --golden evals/data/golden.jsonl
+
+    # Compare two prompt versions over the same cases
+    uv run python evals/main.py compare --golden evals/data/golden.jsonl \
+        --variant v1 --variant v2
+
+    # Gate a deploy: fail if accuracy drops or invention rises
+    uv run python evals/main.py run --golden evals/data/golden.jsonl \
+        --min-accuracy 0.85 --max-invention 0.02
+"""
 
 import argparse
 import asyncio
 import os
 import sys
-from typing import (
-    Any,
-    Dict,
-    Optional,
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import colorama  # noqa: E402
+from colorama import Fore, Style  # noqa: E402
+
+from app.core.config import settings  # noqa: E402
+from evals.harness import (  # noqa: E402
+    load_golden_set,
+    run_report,
+    write_report,
 )
+from evals.schemas import RunReport  # noqa: E402
 
-import colorama
-from colorama import (
-    Fore,
-    Style,
-)
-
-# Fix import path for app module
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from app.core.config import settings
-from app.core.logging import logger
-from evals.evaluator import Evaluator
-
-# Default configuration
-DEFAULT_CONFIG = {
-    "generate_report": True,
-    "model": settings.EVALUATION_LLM,
-    "api_base": settings.EVALUATION_BASE_URL,
-}
+colorama.init(autoreset=True)
 
 
-def print_title(title: str) -> None:
-    """Print a formatted title with colors.
+def _pct(value: float) -> str:
+    """Format a rate as a percentage.
 
     Args:
-        title: The title text to print
-    """
-    print("\n" + "=" * 60)
-    print(f"{Fore.CYAN}{Style.BRIGHT}{title.center(60)}{Style.RESET_ALL}")
-    print("=" * 60 + "\n")
-
-
-def print_info(message: str) -> None:
-    """Print an info message with colors.
-
-    Args:
-        message: The message to print
-    """
-    print(f"{Fore.GREEN}• {message}{Style.RESET_ALL}")
-
-
-def print_warning(message: str) -> None:
-    """Print a warning message with colors.
-
-    Args:
-        message: The message to print
-    """
-    print(f"{Fore.YELLOW}⚠ {message}{Style.RESET_ALL}")
-
-
-def print_error(message: str) -> None:
-    """Print an error message with colors.
-
-    Args:
-        message: The message to print
-    """
-    print(f"{Fore.RED}✗ {message}{Style.RESET_ALL}")
-
-
-def print_success(message: str) -> None:
-    """Print a success message with colors.
-
-    Args:
-        message: The message to print
-    """
-    print(f"{Fore.GREEN}✓ {message}{Style.RESET_ALL}")
-
-
-def get_user_input(prompt: str, default: Optional[str] = None) -> Optional[str]:
-    """Get user input with a colored prompt.
-
-    Args:
-        prompt: The prompt to display
-        default: Default value if user presses enter
+        value: A rate between 0 and 1.
 
     Returns:
-        User input or default value (which may be None if no default was supplied)
+        str: e.g. ``"87.5%"``.
     """
-    default_text = f" [{default}]" if default else ""
-    user_input = input(f"{Fore.BLUE}{prompt}{default_text}: {Style.RESET_ALL}")
-    return user_input if user_input else default
+    return f"{value * 100:.1f}%"
 
 
-def get_yes_no(prompt: str, default: bool = True) -> bool:
-    """Get a yes/no response from the user.
+def _print_report(report: RunReport) -> None:
+    """Print a scorecard.
 
     Args:
-        prompt: The prompt to display
-        default: Default value if user presses enter
+        report: The report to print.
+    """
+    print()
+    print("=" * 68)
+    print(f"{Style.BRIGHT}{report.label}{Style.RESET_ALL}")
+    print("=" * 68)
+    print(f"  casos                  {report.cases}   (fallidos: {report.failures})")
+    print(f"  exactitud de campos    {Fore.GREEN}{_pct(report.field_accuracy)}{Style.RESET_ALL}")
+    print(f"  tasa de omisión        {_pct(report.miss_rate)}")
+
+    invention_colour = Fore.GREEN if report.invention_rate <= 0.02 else Fore.RED
+    print(f"  tasa de invención      {invention_colour}{_pct(report.invention_rate)}{Style.RESET_ALL}")
+
+    print(f"  citas verificables     {_pct(report.grounding_rate)}")
+    print(f"  latencia media         {report.mean_latency_ms} ms")
+    print(f"  tokens totales         {report.total_tokens:,}")
+    print()
+
+    worst = [
+        field
+        for result in report.results
+        for field in result.fields
+        if field.outcome in ("mismatch", "invented", "ungrounded")
+    ]
+    if worst:
+        print(f"{Style.BRIGHT}Campos con más errores{Style.RESET_ALL}")
+        counts: dict[str, int] = {}
+        for field in worst:
+            key = f"{field.path} ({field.outcome})"
+            counts[key] = counts.get(key, 0) + 1
+        for key, count in sorted(counts.items(), key=lambda item: -item[1])[:10]:
+            print(f"  {count:>3}  {key}")
+        print()
+
+
+async def command_run(args: argparse.Namespace) -> int:
+    """Score one configuration.
+
+    Args:
+        args: Parsed arguments.
 
     Returns:
-        True for yes, False for no
+        int: Process exit code.
     """
-    default_value = "Y/n" if default else "y/N"
-    response = get_user_input(f"{prompt} {default_value}")
+    cases = load_golden_set(args.golden)
+    if not cases:
+        print(f"{Fore.RED}El conjunto dorado está vacío.{Style.RESET_ALL}")
+        return 1
 
-    if not response:
-        return default
+    report = await run_report(cases, label=args.label, concurrency=args.concurrency)
+    _print_report(report)
 
-    return response.lower() in ("y", "yes")
+    if args.output:
+        write_report(report, args.output)
+        print(f"Informe completo: {args.output}")
 
-
-def display_summary(report: Dict[str, Any]) -> None:
-    """Display a summary of the evaluation results.
-
-    Args:
-        report: The evaluation report
-    """
-    print_title("Evaluation Summary")
-
-    print(f"{Fore.CYAN}Model:{Style.RESET_ALL} {report['model']}")
-    print(f"{Fore.CYAN}Duration:{Style.RESET_ALL} {report['duration_seconds']} seconds")
-    print(f"{Fore.CYAN}Total Traces:{Style.RESET_ALL} {report['total_traces']}")
-
-    success_rate = 0
-    if report["total_traces"] > 0:
-        success_rate = (report["successful_traces"] / report["total_traces"]) * 100
-
-    if success_rate > 80:
-        status_color = Fore.GREEN
-    elif success_rate > 50:
-        status_color = Fore.YELLOW
-    else:
-        status_color = Fore.RED
-
-    print(
-        f"{Fore.CYAN}Success Rate:{Style.RESET_ALL} {status_color}{success_rate:.1f}%{Style.RESET_ALL} ({report['successful_traces']}/{report['total_traces']})"
-    )
-
-    print("\n" + f"{Fore.CYAN}Metrics Summary:{Style.RESET_ALL}")
-    for metric_name, data in report["metrics_summary"].items():
-        total = data["success_count"] + data["failure_count"]
-        success_percent = 0
-        if total > 0:
-            success_percent = (data["success_count"] / total) * 100
-
-        if success_percent > 80:
-            status_color = Fore.GREEN
-        elif success_percent > 50:
-            status_color = Fore.YELLOW
-        else:
-            status_color = Fore.RED
-
+    # Deploy gate. Two thresholds, because a prompt that raises accuracy while
+    # raising invention has made the tool more dangerous, not better.
+    failed = False
+    if args.min_accuracy is not None and report.field_accuracy < args.min_accuracy:
         print(
-            f"  • {metric_name}: {status_color}{success_percent:.1f}%{Style.RESET_ALL} success, avg score: {data['avg_score']:.2f}"
+            f"{Fore.RED}✗ exactitud {_pct(report.field_accuracy)} "
+            f"< mínimo {_pct(args.min_accuracy)}{Style.RESET_ALL}"
         )
+        failed = True
+    if args.max_invention is not None and report.invention_rate > args.max_invention:
+        print(
+            f"{Fore.RED}✗ invención {_pct(report.invention_rate)} "
+            f"> máximo {_pct(args.max_invention)}{Style.RESET_ALL}"
+        )
+        failed = True
 
-    if report["generate_report_path"]:
-        print(f"\n{Fore.CYAN}Report generated at:{Style.RESET_ALL} {report['generate_report_path']}")
-
-
-async def run_evaluation(generate_report: bool = True) -> None:
-    """Run the evaluation process.
-
-    Args:
-        generate_report: Whether to generate a JSON report
-    """
-    print_title("Starting Evaluation")
-    print_info(f"Using model: {settings.EVALUATION_LLM}")
-    print_info(f"Report generation: {'Enabled' if generate_report else 'Disabled'}")
-
-    try:
-        evaluator = Evaluator()
-        await evaluator.run(generate_report_file=generate_report)
-
-        print_success("Evaluation completed successfully!")
-
-        # Display summary of results
-        display_summary(evaluator.report)
-
-    except Exception as e:
-        print_error(f"Evaluation failed: {str(e)}")
-        logger.error("evaluation_failed", error=str(e))
-        sys.exit(1)
+    return 1 if failed else 0
 
 
-def display_configuration(config: Dict[str, Any]) -> None:
-    """Display the current configuration.
+async def command_compare(args: argparse.Namespace) -> int:
+    """Run the same cases under several prompt versions and tabulate.
 
     Args:
-        config: The configuration dictionary
+        args: Parsed arguments.
+
+    Returns:
+        int: Process exit code.
     """
-    print_title("Configuration")
-    print_info(f"Model: {config['model']}")
-    print_info(f"API Base: {config['api_base']}")
-    print_info(f"Generate Report: {'Yes' if config['generate_report'] else 'No'}")
+    cases = load_golden_set(args.golden)
+    if not cases:
+        print(f"{Fore.RED}El conjunto dorado está vacío.{Style.RESET_ALL}")
+        return 1
 
-
-def interactive_mode() -> None:
-    """Run the evaluator in interactive mode."""
-    colorama.init()
-
-    # Create a configuration with default values
-    config = DEFAULT_CONFIG.copy()
-
-    print_title("Evaluation Runner")
-    print_info("Welcome to the Evaluation Runner!")
-    print_info("Press Enter to accept default values or input your own.")
-
-    # Display current configuration
-    display_configuration(config)
-
-    print("\n" + f"{Fore.CYAN}Configuration Options (press Enter to accept defaults):{Style.RESET_ALL}")
-
-    # Allow user to change configuration or accept defaults
-    change_config = get_yes_no("Would you like to change the default configuration?", default=False)
-
-    if change_config:
-        config["generate_report"] = get_yes_no("Generate JSON report?", default=config["generate_report"])
-
-    print("\n")
-    confirm = get_yes_no("Ready to start evaluation with these settings?", default=True)
-
-    if confirm:
-        asyncio.run(run_evaluation(generate_report=config["generate_report"]))
-    else:
-        print_warning("Evaluation canceled.")
-
-
-def quick_mode() -> None:
-    """Run the evaluator with all default settings."""
-    colorama.init()
-    print_title("Quick Evaluation")
-    print_info("Running evaluation with default settings...")
-    print_info("(Press Ctrl+C to cancel)")
-
-    # Display defaults
-    display_configuration(DEFAULT_CONFIG)
+    reports: list[RunReport] = []
+    original_version = settings.ANALYSIS_PROMPT_VERSION
 
     try:
-        asyncio.run(run_evaluation(generate_report=DEFAULT_CONFIG["generate_report"]))
-    except KeyboardInterrupt:
-        print_warning("\nEvaluation canceled by user.")
-        sys.exit(0)
+        for variant in args.variant:
+            # The harness reads the prompt version from settings, so a variant is
+            # applied by setting it for the duration of that run.
+            settings.ANALYSIS_PROMPT_VERSION = variant
+            report = await run_report(
+                cases,
+                label=f"{settings.GEMINI_MODEL}/{variant}",
+                concurrency=args.concurrency,
+            )
+            reports.append(report)
+            _print_report(report)
+    finally:
+        settings.ANALYSIS_PROMPT_VERSION = original_version
+
+    print("=" * 96)
+    print(
+        f"{'CONFIGURACIÓN':<32} {'EXACT.':>9} {'OMISIÓN':>9} "
+        f"{'INVENCIÓN':>11} {'CITAS':>9} {'LAT.(ms)':>10} {'TOKENS':>10}"
+    )
+    print("-" * 96)
+    for report in reports:
+        print(
+            f"{report.label:<32} {_pct(report.field_accuracy):>9} {_pct(report.miss_rate):>9} "
+            f"{_pct(report.invention_rate):>11} {_pct(report.grounding_rate):>9} "
+            f"{report.mean_latency_ms:>10} {report.total_tokens:>10,}"
+        )
+    print()
+
+    best = max(reports, key=lambda r: (r.field_accuracy - r.invention_rate))
+    print(f"{Fore.GREEN}Mejor configuración: {best.label}{Style.RESET_ALL}")
+    print(f"{Style.DIM}(exactitud menos invención — una mejora que inventa más no es una mejora){Style.RESET_ALL}")
+
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI.
+
+    Returns:
+        argparse.ArgumentParser: The configured parser.
+    """
+    parser = argparse.ArgumentParser(prog="evals/main.py", description="Evaluación del agente de pólizas.")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    def common(subparser: argparse.ArgumentParser) -> None:
+        subparser.add_argument("--golden", type=Path, default=Path("evals/data/golden.jsonl"))
+        subparser.add_argument("--concurrency", type=int, default=4)
+
+    run_parser = subparsers.add_parser("run", help="Ejecutar y calificar una configuración.")
+    common(run_parser)
+    run_parser.add_argument("--label", default=None)
+    run_parser.add_argument("--output", type=Path, default=None)
+    run_parser.add_argument("--min-accuracy", type=float, default=None)
+    run_parser.add_argument("--max-invention", type=float, default=None)
+    run_parser.set_defaults(handler=command_run)
+
+    compare_parser = subparsers.add_parser("compare", help="Comparar varias versiones de prompt.")
+    common(compare_parser)
+    compare_parser.add_argument(
+        "--variant",
+        action="append",
+        required=True,
+        help="Versión de prompt a evaluar. Repetir para comparar (p. ej. --variant v1 --variant v2).",
+    )
+    compare_parser.set_defaults(handler=command_compare)
+
+    return parser
 
 
 def main() -> None:
-    """Main entry point for the command-line interface."""
-    parser = argparse.ArgumentParser(description="Run evaluations on model outputs")
-    parser.add_argument("--no-report", action="store_true", help="Don't generate a JSON report")
-    parser.add_argument("--interactive", action="store_true", help="Run in interactive mode")
-    parser.add_argument("--quick", action="store_true", help="Run with all default settings (no prompts)")
+    """Entry point."""
+    args = build_parser().parse_args()
 
-    args = parser.parse_args()
+    if not settings.GEMINI_API_KEY and not os.getenv("GEMINI_API_KEY"):
+        print(f"{Fore.RED}GEMINI_API_KEY no está configurada.{Style.RESET_ALL}")
+        raise SystemExit(1)
 
-    if args.quick:
-        quick_mode()
-    elif args.interactive:
-        interactive_mode()
-    else:
-        # Run with command-line arguments
-        asyncio.run(run_evaluation(generate_report=not args.no_report))
+    raise SystemExit(asyncio.run(args.handler(args)))
 
 
 if __name__ == "__main__":

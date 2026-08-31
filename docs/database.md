@@ -93,4 +93,4 @@ pgvector must be enabled before running migrations:
 CREATE EXTENSION IF NOT EXISTS vector;
 ```
 
-With Docker (`make docker-up`), this is handled automatically by the `db` service. For external databases (e.g. Supabase), enable the extension via the dashboard or SQL editor.
+On the VPS, run it once as the `postgres` superuser (`sudo -u postgres psql -d contigocare -c 'CREATE EXTENSION IF NOT EXISTS vector;'`) — the app's `ccadmin` role owns the database but cannot create extensions. For external databases (e.g. Supabase), enable the extension via the dashboard or SQL editor.

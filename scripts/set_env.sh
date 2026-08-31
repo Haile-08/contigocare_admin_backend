@@ -29,22 +29,40 @@ fi
 # Set environment variables
 export APP_ENV=$ENV
 
-validate_jwt_secret_key() {
-    local secret="$1"
+# Mirrors `looks_like_placeholder` in app/core/config.py. Matching on the shape
+# of a placeholder rather than a list of exact strings is what catches the value
+# .env.example actually ships — "CHANGE_ME_generate_with_secrets_token_urlsafe_48"
+# is 48 characters long, so a length check alone waves it through.
+validate_secret() {
+    local name="$1"
+    local secret="$2"
     local secret_lc
     secret_lc="$(printf '%s' "$secret" | tr '[:upper:]' '[:lower:]')"
 
     if [ ${#secret} -lt 32 ]; then
-        echo -e "${RED}Error: JWT_SECRET_KEY must be at least 32 characters long.${NC}"
+        echo -e "${RED}Error: $name must be at least 32 characters long.${NC}"
         return 1
     fi
 
     case "$secret_lc" in
-        "changeme"|"change_me"|"change_me_to_a_random_32_plus_char_string"|"supersecretkeythatshouldbechangedforproduction"|"your-jwt-secret-key")
-            echo -e "${RED}Error: JWT_SECRET_KEY is still using a placeholder/default value.${NC}"
+        *change_me*|*change-me*|*changeme*|your-*|your_*|*placeholder*|*example*|*generate_with*|*replace*|*xxxx*|\
+        "supersecretkeythatshouldbechangedforproduction")
+            echo -e "${RED}Error: $name is still using a placeholder/default value.${NC}"
             return 1
             ;;
     esac
+
+    return 0
+}
+
+validate_all_secrets() {
+    validate_secret "JWT_SECRET_KEY" "${JWT_SECRET_KEY:-}" || return 1
+    validate_secret "ENCRYPTION_KEY" "${ENCRYPTION_KEY:-}" || return 1
+
+    if [ "${JWT_SECRET_KEY:-}" = "${ENCRYPTION_KEY:-}" ]; then
+        echo -e "${RED}Error: ENCRYPTION_KEY must not be the same value as JWT_SECRET_KEY.${NC}"
+        return 1
+    fi
 
     return 0
 }
@@ -71,6 +89,19 @@ else
 
     EXAMPLE_FILE="$PROJECT_ROOT/.env.example"
     if [ -f "$EXAMPLE_FILE" ]; then
+        # Never scaffold a production environment from the template. The copy
+        # would carry the template's placeholder secrets, and the operator who
+        # ran this is one `start_app` away from serving on a signing key that is
+        # published in the repository. Development is allowed to scaffold
+        # because it is expected to be edited before it is useful.
+        if [ "$ENV" = "production" ]; then
+            echo -e "${RED}Error: $ENV_FILE does not exist.${NC}"
+            echo -e "${PURPLE}Create it deliberately — do not copy .env.example. Generate real secrets with:${NC}"
+            echo -e "  python -c \"import secrets; print(secrets.token_urlsafe(48))\"                       # JWT_SECRET_KEY"
+            echo -e "  python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\"  # ENCRYPTION_KEY"
+            return 1
+        fi
+
         cp "$EXAMPLE_FILE" "$ENV_FILE"
         echo -e "${GREEN}Created $ENV_FILE from template.${NC}"
         echo -e "${PURPLE}Please update it with your configuration.${NC}"
@@ -80,7 +111,7 @@ else
         source "$ENV_FILE"
         set +a
 
-        validate_jwt_secret_key "${JWT_SECRET_KEY:-}" || return 1
+        validate_all_secrets || return 1
 
         echo -e "${GREEN}Successfully loaded environment variables from new $ENV_FILE${NC}"
     else
@@ -89,7 +120,7 @@ else
     fi
 fi
 
-validate_jwt_secret_key "${JWT_SECRET_KEY:-}" || return 1
+validate_all_secrets || return 1
 
 # Print current environment
 echo -e "\n${GREEN}======= ENVIRONMENT SUMMARY =======${NC}"

@@ -8,6 +8,13 @@ Copy `.env.example` to get started:
 cp .env.example .env.development
 ```
 
+**In production there is no `.env` file.** The settings are an encrypted systemd
+credential; systemd decrypts it into a per-service tmpfs and points at it with
+`$CREDENTIALS_DIRECTORY`, which `load_env_file()` reads *before* any file on
+disk — so a stale `.env.production` left in the app directory can never take
+over. See [deploy/README.md](../deploy/README.md) §5, and use
+`contigocare-run` for one-off commands that need the secrets.
+
 ---
 
 ## Application

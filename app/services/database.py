@@ -1,18 +1,40 @@
-"""This file contains the database service for the application."""
+"""Database access for the console.
 
-from typing import (
-    List,
-    Optional,
+Converted to a genuinely async engine. The previous version declared ``async
+def`` around synchronous SQLModel sessions, which does not make a query
+non-blocking — it blocks the event loop while claiming not to, and under any
+real concurrency that is worse than being honestly synchronous. Here the driver
+is psycopg3 in async mode, so a query actually yields.
+
+Every method takes and returns model objects rather than exposing sessions, so
+no route handler holds a transaction open across a model call that might take
+forty seconds.
+"""
+
+import uuid
+from datetime import (
+    UTC,
+    datetime,
+    timedelta,
 )
+from typing import (
+    Any,
+    Optional,
+    Sequence,
+)
+from urllib.parse import quote_plus
 
-from fastapi import HTTPException
-from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.pool import QueuePool
-from sqlmodel import (
-    Session,
-    col,
-    create_engine,
+from sqlalchemy import (
+    delete,
+    func,
     select,
+    update,
+)
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
 )
 
 from app.core.config import (
@@ -20,235 +42,671 @@ from app.core.config import (
     settings,
 )
 from app.core.logging import logger
-from app.models.session import Session as ChatSession
-from app.models.user import User
+from app.models.admin import Admin
+from app.models.analysis import (
+    AnalysisFeedback,
+    AnalysisRun,
+    AnalysisStatus,
+    FeedbackVerdict,
+)
+from app.models.base import utcnow
+from app.models.password_reset_token import (
+    PasswordResetToken,
+    hash_reset_token,
+)
+from app.models.refresh_token import (
+    RecoveryCode,
+    RefreshToken,
+    hash_token,
+)
 
 
 class DatabaseService:
-    """Service class for database operations.
-
-    This class handles all database operations for Users, Sessions, and Messages.
-    It uses SQLModel for ORM operations and maintains a connection pool.
-    """
+    """All database operations, as async methods."""
 
     def __init__(self):
-        """Initialize database service with connection pool."""
+        """Create the async engine and session factory."""
         try:
-            # Configure environment-specific database connection pool settings
-            pool_size = settings.POSTGRES_POOL_SIZE
-            max_overflow = settings.POSTGRES_MAX_OVERFLOW
-
-            # Create engine with appropriate pool configuration
             connection_url = (
-                f"postgresql://{settings.POSTGRES_USER}:{settings.POSTGRES_PASSWORD}"
+                "postgresql+psycopg://"
+                f"{quote_plus(settings.POSTGRES_USER)}:{quote_plus(settings.POSTGRES_PASSWORD)}"
                 f"@{settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}"
             )
 
-            self.engine = create_engine(
+            self.engine = create_async_engine(
                 connection_url,
                 pool_pre_ping=True,
-                poolclass=QueuePool,
-                pool_size=pool_size,
-                max_overflow=max_overflow,
-                pool_timeout=30,  # Connection timeout (seconds)
-                pool_recycle=1800,  # Recycle connections after 30 minutes
+                pool_size=settings.POSTGRES_POOL_SIZE,
+                max_overflow=settings.POSTGRES_MAX_OVERFLOW,
+                pool_timeout=30,
+                pool_recycle=1800,
+                # SQL is never echoed. Query logs from this service would carry
+                # redacted policy text into the application log, which is a
+                # second copy of data we promised to keep in one place.
+                echo=False,
+            )
+
+            self.session_factory = async_sessionmaker(
+                self.engine,
+                class_=AsyncSession,
+                expire_on_commit=False,
             )
 
             logger.info(
                 "database_initialized",
                 environment=settings.ENVIRONMENT.value,
-                pool_size=pool_size,
-                max_overflow=max_overflow,
+                pool_size=settings.POSTGRES_POOL_SIZE,
             )
         except SQLAlchemyError as e:
-            logger.error("database_initialization_error", error=str(e), environment=settings.ENVIRONMENT.value)
-            # In production, don't raise - allow app to start even with DB issues
+            logger.error("database_initialization_error", error=str(e))
             if settings.ENVIRONMENT != Environment.PRODUCTION:
                 raise
 
-    async def create_user(self, email: str, password: str, username: str | None = None) -> User:
-        """Create a new user.
+    # ------------------------------------------------------------------
+    # Admins
+    # ------------------------------------------------------------------
+
+    async def get_admin_by_email(self, email: str) -> Optional[Admin]:
+        """Look up an admin by email.
 
         Args:
-            email: User's email address
-            password: Hashed password
-            username: Optional display name
+            email: The email, matched case-insensitively.
 
         Returns:
-            User: The created user
+            Optional[Admin]: The account, or None.
         """
-        with Session(self.engine) as session:
-            user = User(email=email, hashed_password=password, username=username)
-            session.add(user)
-            session.commit()
-            session.refresh(user)
-            logger.info("user_created", email=email)
-            return user
+        async with self.session_factory() as session:
+            result = await session.execute(select(Admin).where(Admin.email == email.strip().lower()))
+            return result.scalar_one_or_none()
 
-    async def get_user(self, user_id: int) -> Optional[User]:
-        """Get a user by ID.
+    async def get_admin_by_id(self, admin_id: uuid.UUID) -> Optional[Admin]:
+        """Look up an admin by id.
 
         Args:
-            user_id: The ID of the user to retrieve
+            admin_id: The account id.
 
         Returns:
-            Optional[User]: The user if found, None otherwise
+            Optional[Admin]: The account, or None.
         """
-        with Session(self.engine) as session:
-            user = session.get(User, user_id)
-            return user
+        async with self.session_factory() as session:
+            return await session.get(Admin, admin_id)
 
-    async def get_user_by_email(self, email: str) -> Optional[User]:
-        """Get a user by email.
+    async def save_admin(self, admin: Admin) -> Admin:
+        """Persist changes to an admin row.
 
         Args:
-            email: The email of the user to retrieve
+            admin: The modified account.
 
         Returns:
-            Optional[User]: The user if found, None otherwise
+            Admin: The refreshed account.
         """
-        with Session(self.engine) as session:
-            statement = select(User).where(User.email == email)
-            user = session.exec(statement).first()
-            return user
+        async with self.session_factory() as session:
+            merged = await session.merge(admin)
+            await session.commit()
+            await session.refresh(merged)
+            return merged
 
-    async def delete_user_by_email(self, email: str) -> bool:
-        """Delete a user by email.
+    # ------------------------------------------------------------------
+    # Refresh tokens
+    # ------------------------------------------------------------------
+
+    async def create_refresh_token(
+        self,
+        admin_id: uuid.UUID,
+        raw_token: str,
+        expires_at: datetime,
+        family_id: Optional[uuid.UUID] = None,
+        client_fingerprint: Optional[str] = None,
+    ) -> RefreshToken:
+        """Store a newly issued refresh token.
 
         Args:
-            email: The email of the user to delete
+            admin_id: Owner.
+            raw_token: The token handed to the client. Only its hash is stored.
+            expires_at: Absolute expiry.
+            family_id: Rotation family. A new login starts a new family.
+            client_fingerprint: Advisory client binding.
 
         Returns:
-            bool: True if deletion was successful, False if user not found
+            RefreshToken: The stored record.
         """
-        with Session(self.engine) as session:
-            user = session.exec(select(User).where(User.email == email)).first()
-            if not user:
-                return False
+        record = RefreshToken(
+            admin_id=admin_id,
+            token_hash=hash_token(raw_token),
+            family_id=family_id or uuid.uuid4(),
+            expires_at=expires_at,
+            client_fingerprint=client_fingerprint,
+        )
 
-            session.delete(user)
-            session.commit()
-            logger.info("user_deleted", email=email)
-            return True
+        async with self.session_factory() as session:
+            session.add(record)
+            await session.commit()
+            await session.refresh(record)
+            return record
 
-    async def create_session(
-        self, session_id: str, user_id: int, name: str = "", username: str | None = None
-    ) -> ChatSession:
-        """Create a new chat session.
+    async def get_refresh_token(self, raw_token: str) -> Optional[RefreshToken]:
+        """Find a refresh token record by the raw token.
 
         Args:
-            session_id: The ID for the new session
-            user_id: The ID of the user who owns the session
-            name: Optional name for the session (defaults to empty string)
-            username: Display name copied from the user for LLM personalization
+            raw_token: The token from the cookie.
 
         Returns:
-            ChatSession: The created session
+            Optional[RefreshToken]: The record, or None if unknown.
         """
-        with Session(self.engine) as session:
-            chat_session = ChatSession(id=session_id, user_id=user_id, name=name, username=username)
-            session.add(chat_session)
-            session.commit()
-            session.refresh(chat_session)
-            logger.info("session_created", session_id=session_id, user_id=user_id, name=name)
-            return chat_session
-
-    async def delete_session(self, session_id: str) -> bool:
-        """Delete a session by ID.
-
-        Args:
-            session_id: The ID of the session to delete
-
-        Returns:
-            bool: True if deletion was successful, False if session not found
-        """
-        with Session(self.engine) as session:
-            chat_session = session.get(ChatSession, session_id)
-            if not chat_session:
-                return False
-
-            session.delete(chat_session)
-            session.commit()
-            logger.info("session_deleted", session_id=session_id)
-            return True
-
-    async def get_session(self, session_id: str) -> Optional[ChatSession]:
-        """Get a session by ID.
-
-        Args:
-            session_id: The ID of the session to retrieve
-
-        Returns:
-            Optional[ChatSession]: The session if found, None otherwise
-        """
-        with Session(self.engine) as session:
-            chat_session = session.get(ChatSession, session_id)
-            return chat_session
-
-    async def get_user_sessions(self, user_id: int) -> List[ChatSession]:
-        """Get all sessions for a user.
-
-        Args:
-            user_id: The ID of the user
-
-        Returns:
-            List[ChatSession]: List of user's sessions
-        """
-        with Session(self.engine) as session:
-            statement = (
-                select(ChatSession).where(col(ChatSession.user_id) == user_id).order_by(col(ChatSession.created_at))
+        async with self.session_factory() as session:
+            result = await session.execute(
+                select(RefreshToken).where(RefreshToken.token_hash == hash_token(raw_token))
             )
-            sessions = session.exec(statement).all()
-            return list(sessions)
+            return result.scalar_one_or_none()
 
-    async def update_session_name(self, session_id: str, name: str) -> ChatSession:
-        """Update a session's name.
+    async def mark_refresh_token_used(self, token_id: uuid.UUID) -> None:
+        """Mark a refresh token as exchanged.
 
         Args:
-            session_id: The ID of the session to update
-            name: The new name for the session
+            token_id: The record id.
+        """
+        async with self.session_factory() as session:
+            await session.execute(
+                update(RefreshToken).where(RefreshToken.id == token_id).values(used_at=utcnow())
+            )
+            await session.commit()
+
+    async def revoke_token_family(self, family_id: uuid.UUID, reason: str) -> int:
+        """Revoke every live token descended from one login.
+
+        Called on logout and — importantly — when a already-used token is
+        presented again, which means the token was stolen.
+
+        Args:
+            family_id: The family to kill.
+            reason: Recorded for audit.
 
         Returns:
-            ChatSession: The updated session
-
-        Raises:
-            HTTPException: If session is not found
+            int: How many tokens were revoked.
         """
-        with Session(self.engine) as session:
-            chat_session = session.get(ChatSession, session_id)
-            if not chat_session:
-                raise HTTPException(status_code=404, detail="Session not found")
+        async with self.session_factory() as session:
+            result = await session.execute(
+                update(RefreshToken)
+                .where(
+                    RefreshToken.family_id == family_id,
+                    RefreshToken.revoked_at.is_(None),
+                )
+                .values(revoked_at=utcnow(), revoked_reason=reason[:64])
+            )
+            await session.commit()
+            return result.rowcount or 0
 
-            chat_session.name = name
-            session.add(chat_session)
-            session.commit()
-            session.refresh(chat_session)
-            logger.info("session_name_updated", session_id=session_id, name=name)
-            return chat_session
+    async def revoke_all_admin_tokens(self, admin_id: uuid.UUID, reason: str) -> int:
+        """Revoke every refresh token an admin holds.
 
-    def get_session_maker(self):
-        """Get a session maker for creating database sessions.
+        Args:
+            admin_id: The account.
+            reason: Recorded for audit.
 
         Returns:
-            Session: A SQLModel session maker
+            int: How many tokens were revoked.
         """
-        return Session(self.engine)
+        async with self.session_factory() as session:
+            result = await session.execute(
+                update(RefreshToken)
+                .where(
+                    RefreshToken.admin_id == admin_id,
+                    RefreshToken.revoked_at.is_(None),
+                )
+                .values(revoked_at=utcnow(), revoked_reason=reason[:64])
+            )
+            await session.commit()
+            return result.rowcount or 0
+
+    async def purge_expired_tokens(self) -> int:
+        """Delete refresh tokens that expired more than a week ago.
+
+        Keeping them briefly past expiry preserves the audit trail for a
+        post-incident look; keeping them forever grows a table nothing reads.
+
+        Returns:
+            int: Rows deleted.
+        """
+        cutoff = datetime.now(UTC) - timedelta(days=7)
+        async with self.session_factory() as session:
+            result = await session.execute(delete(RefreshToken).where(RefreshToken.expires_at < cutoff))
+            await session.commit()
+            return result.rowcount or 0
+
+    # ------------------------------------------------------------------
+    # Password reset tokens
+    # ------------------------------------------------------------------
+
+    async def create_password_reset_token(
+        self,
+        admin_id: uuid.UUID,
+        raw_token: str,
+        expires_at: datetime,
+        requested_fingerprint: Optional[str] = None,
+    ) -> PasswordResetToken:
+        """Issue a reset token, retiring any the account already holds.
+
+        Both happen in one transaction: an operator who clicks "send it again"
+        must end up with exactly one working link, and a window where the old
+        one is dead but the new one is not yet stored would be a window where
+        neither works.
+
+        Args:
+            admin_id: Owner of the token.
+            raw_token: The token going into the email. Only its hash is stored.
+            expires_at: Absolute expiry.
+            requested_fingerprint: Advisory record of who asked.
+
+        Returns:
+            PasswordResetToken: The stored record.
+        """
+        record = PasswordResetToken(
+            admin_id=admin_id,
+            token_hash=hash_reset_token(raw_token),
+            expires_at=expires_at,
+            requested_fingerprint=requested_fingerprint,
+        )
+
+        async with self.session_factory() as session:
+            await session.execute(
+                update(PasswordResetToken)
+                .where(
+                    PasswordResetToken.admin_id == admin_id,
+                    PasswordResetToken.used_at.is_(None),
+                )
+                .values(used_at=utcnow())
+            )
+            session.add(record)
+            await session.commit()
+            await session.refresh(record)
+            return record
+
+    async def get_password_reset_token(self, raw_token: str) -> Optional[PasswordResetToken]:
+        """Find a reset token record by the raw token from the link.
+
+        Args:
+            raw_token: The token from the email link.
+
+        Returns:
+            Optional[PasswordResetToken]: The record, or None if unknown.
+        """
+        async with self.session_factory() as session:
+            result = await session.execute(
+                select(PasswordResetToken).where(PasswordResetToken.token_hash == hash_reset_token(raw_token))
+            )
+            return result.scalar_one_or_none()
+
+    async def consume_password_reset_tokens(self, admin_id: uuid.UUID) -> int:
+        """Mark every outstanding reset token for an account as spent.
+
+        Called on redemption rather than marking only the token presented: a
+        second link that is still live after a password change is a second way
+        in for whoever caused the operator to reset in the first place.
+
+        Args:
+            admin_id: The account.
+
+        Returns:
+            int: How many tokens were retired.
+        """
+        async with self.session_factory() as session:
+            result = await session.execute(
+                update(PasswordResetToken)
+                .where(
+                    PasswordResetToken.admin_id == admin_id,
+                    PasswordResetToken.used_at.is_(None),
+                )
+                .values(used_at=utcnow())
+            )
+            await session.commit()
+            return result.rowcount or 0
+
+    async def purge_expired_password_reset_tokens(self) -> int:
+        """Delete reset tokens that expired more than a day ago.
+
+        Returns:
+            int: Rows deleted.
+        """
+        cutoff = datetime.now(UTC) - timedelta(days=1)
+        async with self.session_factory() as session:
+            result = await session.execute(delete(PasswordResetToken).where(PasswordResetToken.expires_at < cutoff))
+            await session.commit()
+            return result.rowcount or 0
+
+    # ------------------------------------------------------------------
+    # Recovery codes
+    # ------------------------------------------------------------------
+
+    async def replace_recovery_codes(self, admin_id: uuid.UUID, code_hashes: Sequence[str]) -> None:
+        """Replace an admin's recovery codes with a fresh set.
+
+        Args:
+            admin_id: The account.
+            code_hashes: bcrypt hashes of the new codes.
+        """
+        async with self.session_factory() as session:
+            await session.execute(delete(RecoveryCode).where(RecoveryCode.admin_id == admin_id))
+            for code_hash in code_hashes:
+                session.add(RecoveryCode(admin_id=admin_id, code_hash=code_hash))
+            await session.commit()
+
+    async def get_unused_recovery_codes(self, admin_id: uuid.UUID) -> list[RecoveryCode]:
+        """Fetch an admin's unspent recovery codes.
+
+        Args:
+            admin_id: The account.
+
+        Returns:
+            list[RecoveryCode]: Unused codes.
+        """
+        async with self.session_factory() as session:
+            result = await session.execute(
+                select(RecoveryCode).where(
+                    RecoveryCode.admin_id == admin_id,
+                    RecoveryCode.used_at.is_(None),
+                )
+            )
+            return list(result.scalars().all())
+
+    async def consume_recovery_code(self, code_id: uuid.UUID) -> None:
+        """Mark a recovery code as spent.
+
+        Args:
+            code_id: The code record.
+        """
+        async with self.session_factory() as session:
+            await session.execute(
+                update(RecoveryCode).where(RecoveryCode.id == code_id).values(used_at=utcnow())
+            )
+            await session.commit()
+
+    # ------------------------------------------------------------------
+    # Analyses
+    # ------------------------------------------------------------------
+
+    async def create_analysis_run(self, run: AnalysisRun) -> AnalysisRun:
+        """Store one analysis run.
+
+        Args:
+            run: The populated record.
+
+        Returns:
+            AnalysisRun: The stored record.
+        """
+        async with self.session_factory() as session:
+            session.add(run)
+            await session.commit()
+            await session.refresh(run)
+            return run
+
+    async def get_analysis_run(self, run_id: uuid.UUID) -> Optional[AnalysisRun]:
+        """Fetch one analysis run.
+
+        Args:
+            run_id: The record id.
+
+        Returns:
+            Optional[AnalysisRun]: The run, or None.
+        """
+        async with self.session_factory() as session:
+            return await session.get(AnalysisRun, run_id)
+
+    async def list_analysis_runs(
+        self,
+        limit: int = 25,
+        offset: int = 0,
+        patient_id: Optional[str] = None,
+    ) -> tuple[list[tuple[AnalysisRun, Optional[FeedbackVerdict]]], int]:
+        """Page through stored runs, newest first, with each one's verdict.
+
+        The verdict is joined here rather than fetched per row, because a list
+        screen that issues one extra query per line is a list screen that gets
+        slower every week it is used.
+
+        Args:
+            limit: Page size.
+            offset: How many rows to skip.
+            patient_id: Restrict to one patient. Matched case-insensitively as a
+                substring, because the operator is typing a remembered
+                identifier into a search box, not pasting a primary key.
+
+        Returns:
+            tuple: ``(rows, total)`` where each row is ``(run, verdict|None)``
+            and ``total`` counts every run matching the filter, not just the
+            page — the pager needs to know what it is paging through.
+        """
+        filters = []
+        if patient_id:
+            filters.append(AnalysisRun.patient_id.ilike(f"%{patient_id}%"))
+
+        async with self.session_factory() as session:
+            total = (
+                await session.execute(
+                    select(func.count()).select_from(AnalysisRun).where(*filters)
+                )
+            ).scalar_one()
+
+            rows = (
+                await session.execute(
+                    select(AnalysisRun, AnalysisFeedback.verdict)
+                    .outerjoin(AnalysisFeedback, AnalysisFeedback.analysis_id == AnalysisRun.id)
+                    .where(*filters)
+                    .order_by(AnalysisRun.created_at.desc())
+                    .limit(limit)
+                    .offset(offset)
+                )
+            ).all()
+
+        return [(row[0], row[1]) for row in rows], int(total or 0)
+
+    async def document_seen_before(self, document_sha256: str) -> bool:
+        """Whether this exact document has been analysed already.
+
+        Args:
+            document_sha256: Digest of the upload.
+
+        Returns:
+            bool: True when a prior run exists.
+        """
+        async with self.session_factory() as session:
+            result = await session.execute(
+                select(func.count())
+                .select_from(AnalysisRun)
+                .where(AnalysisRun.document_sha256 == document_sha256)
+            )
+            return (result.scalar_one() or 0) > 0
+
+    async def create_feedback(self, feedback: AnalysisFeedback) -> AnalysisFeedback:
+        """Store a reviewer's verdict.
+
+        Args:
+            feedback: The populated record.
+
+        Returns:
+            AnalysisFeedback: The stored record.
+        """
+        async with self.session_factory() as session:
+            session.add(feedback)
+            await session.commit()
+            await session.refresh(feedback)
+            return feedback
+
+    async def update_feedback(
+        self,
+        feedback_id: uuid.UUID,
+        admin_id: uuid.UUID,
+        verdict: FeedbackVerdict,
+        field_corrections: dict[str, Any],
+        notes: str,
+    ) -> None:
+        """Revise an existing verdict in place.
+
+        A reviewer changing their mind should leave one verdict on the run, not
+        two. Appending a second row would double-count the analysis in
+        ``evals/build_golden_set.py`` — which joins runs to feedback — and give
+        the dashboard's accuracy rate a denominator larger than the number of
+        analyses actually reviewed.
+
+        Args:
+            feedback_id: The verdict being revised.
+            admin_id: Who is revising it — recorded as the current reviewer.
+            verdict: The new overall call.
+            field_corrections: The new field-level corrections.
+            notes: The new free text.
+        """
+        async with self.session_factory() as session:
+            await session.execute(
+                update(AnalysisFeedback)
+                .where(AnalysisFeedback.id == feedback_id)
+                .values(
+                    admin_id=admin_id,
+                    verdict=verdict,
+                    field_corrections=field_corrections,
+                    notes=notes,
+                    created_at=utcnow(),
+                )
+            )
+            await session.commit()
+
+    async def get_feedback_for_run(self, run_id: uuid.UUID) -> Optional[AnalysisFeedback]:
+        """Fetch the most recent verdict for a run.
+
+        Args:
+            run_id: The analysis.
+
+        Returns:
+            Optional[AnalysisFeedback]: The verdict, or None.
+        """
+        async with self.session_factory() as session:
+            result = await session.execute(
+                select(AnalysisFeedback)
+                .where(AnalysisFeedback.analysis_id == run_id)
+                .order_by(AnalysisFeedback.created_at.desc())
+                .limit(1)
+            )
+            return result.scalar_one_or_none()
+
+    # ------------------------------------------------------------------
+    # Dashboard aggregates
+    # ------------------------------------------------------------------
+
+    async def dashboard_metrics(self, recent_limit: int = 15) -> dict[str, Any]:
+        """Compute every figure the dashboard shows, in the database.
+
+        Aggregating here rather than pulling rows into Python keeps the
+        dashboard a constant number of queries as the table grows.
+
+        Args:
+            recent_limit: How many recent runs to return.
+
+        Returns:
+            dict: Raw aggregates for the route to shape into a response.
+        """
+        week_ago = datetime.now(UTC) - timedelta(days=7)
+
+        async with self.session_factory() as session:
+            totals = (
+                await session.execute(
+                    select(
+                        func.count(AnalysisRun.id),
+                        func.count(func.distinct(AnalysisRun.patient_id)),
+                        func.count(AnalysisRun.id).filter(AnalysisRun.created_at >= week_ago),
+                        func.count(AnalysisRun.id).filter(AnalysisRun.status == AnalysisStatus.SUCCEEDED),
+                        func.count(AnalysisRun.id).filter(
+                            AnalysisRun.status == AnalysisStatus.BLOCKED_BY_REDACTION
+                        ),
+                        func.percentile_cont(0.5)
+                        .within_group(AnalysisRun.latency_ms)
+                        .filter(AnalysisRun.status == AnalysisStatus.SUCCEEDED),
+                    )
+                )
+            ).one()
+
+            verdicts = (
+                await session.execute(
+                    select(AnalysisFeedback.verdict, func.count(AnalysisFeedback.id)).group_by(
+                        AnalysisFeedback.verdict
+                    )
+                )
+            ).all()
+
+            recent_rows = (
+                await session.execute(
+                    select(AnalysisRun, AnalysisFeedback.verdict)
+                    .outerjoin(AnalysisFeedback, AnalysisFeedback.analysis_id == AnalysisRun.id)
+                    .order_by(AnalysisRun.created_at.desc())
+                    .limit(recent_limit)
+                )
+            ).all()
+
+            # Redaction counts live in a JSONB column, so they are summed by
+            # walking the recent window rather than with a SQL aggregate — the
+            # figure is illustrative, not billing-grade.
+            summaries = (
+                await session.execute(
+                    select(AnalysisRun.redaction_summary)
+                    .order_by(AnalysisRun.created_at.desc())
+                    .limit(500)
+                )
+            ).scalars().all()
+
+        redaction_totals: dict[str, int] = {}
+        for summary in summaries:
+            for category, count in (summary or {}).items():
+                redaction_totals[category] = redaction_totals.get(category, 0) + int(count)
+
+        return {
+            "total": totals[0] or 0,
+            "distinct_patients": totals[1] or 0,
+            "last_7_days": totals[2] or 0,
+            "succeeded": totals[3] or 0,
+            "blocked": totals[4] or 0,
+            "median_latency_ms": int(totals[5] or 0),
+            "verdicts": {verdict: count for verdict, count in verdicts},
+            "recent": recent_rows,
+            "redaction_totals": redaction_totals,
+        }
+
+    async def reviewed_counts(self) -> tuple[int, int]:
+        """Count reviewed runs and correct ones.
+
+        Returns:
+            tuple: ``(reviewed, correct)``.
+        """
+        async with self.session_factory() as session:
+            result = (
+                await session.execute(
+                    select(
+                        func.count(AnalysisFeedback.id),
+                        func.count(AnalysisFeedback.id).filter(
+                            AnalysisFeedback.verdict == FeedbackVerdict.CORRECT
+                        ),
+                    )
+                )
+            ).one()
+            return int(result[0] or 0), int(result[1] or 0)
+
+    # ------------------------------------------------------------------
+    # Health
+    # ------------------------------------------------------------------
 
     async def health_check(self) -> bool:
-        """Check database connection health.
+        """Check database connectivity.
 
         Returns:
-            bool: True if database is healthy, False otherwise
+            bool: True when a trivial query succeeds.
         """
         try:
-            with Session(self.engine) as session:
-                # Execute a simple query to check connection
-                session.exec(select(1)).first()
+            async with self.session_factory() as session:
+                await session.execute(select(1))
                 return True
         except Exception as e:
             logger.error("database_health_check_failed", error=str(e))
             return False
 
+    async def close(self) -> None:
+        """Dispose of the connection pool on shutdown."""
+        await self.engine.dispose()
 
-# Create a singleton instance
+
 database_service = DatabaseService()

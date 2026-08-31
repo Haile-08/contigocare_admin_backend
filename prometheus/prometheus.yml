@@ -3,12 +3,19 @@ global:
   evaluation_interval: 15s
 
 scrape_configs:
-  - job_name: 'fastapi'
+  # The API runs on the same VPS, bound to loopback. /metrics is not exposed
+  # through nginx on purpose, so Prometheus must scrape it directly.
+  #
+  # Port 8001 matches deploy/systemd/contigocare-admin.service; use 8000 when
+  # scraping a `make dev` server.
+  - job_name: 'contigocare-admin'
     metrics_path: '/metrics'
     scheme: 'http'
     static_configs:
-      - targets: ['app:8000']
+      - targets: ['127.0.0.1:8001']
 
-  - job_name: 'cadvisor'
-    static_configs:
-      - targets: ['cadvisor:8080']
+  # Host-level metrics, if node_exporter is installed:
+  #   sudo apt install prometheus-node-exporter
+  # - job_name: 'node'
+  #   static_configs:
+  #     - targets: ['127.0.0.1:9100']

@@ -91,7 +91,19 @@ Metrics are exposed at `GET /metrics` and scraped by Prometheus.
 | `llm_stream_duration_seconds` | Histogram | Streaming call latency by model |
 | `db_connections` | Gauge | Active database connections |
 
-Grafana dashboards are pre-configured in `grafana/`. Start the full stack with `make stack-up ENV=development` to access them at [http://localhost:3000](http://localhost:3000) (admin/admin).
+`/metrics` is bound to loopback and is **not** proxied through nginx — it is
+scraped locally, on the same box. `prometheus/prometheus.yml` is the scrape
+config for a natively installed Prometheus:
+
+```bash
+sudo apt install prometheus grafana
+sudo cp /opt/contigocare-admin/prometheus/prometheus.yml /etc/prometheus/prometheus.yml
+sudo cp -r /opt/contigocare-admin/grafana/dashboards /etc/grafana/provisioning/
+sudo systemctl restart prometheus grafana-server
+```
+
+Reach Grafana over an SSH tunnel (`ssh -L 3000:127.0.0.1:3000 …`) rather than
+opening port 3000 in the firewall.
 
 ---
 
