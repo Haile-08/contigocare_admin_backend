@@ -511,7 +511,9 @@ Then install the three config files and swap the site in:
 sudo cp /opt/contigocare-admin/deploy/nginx/cc-admin-rate-limit.conf      /etc/nginx/conf.d/
 sudo cp /opt/contigocare-admin/deploy/nginx/cc-admin-security-headers.conf /etc/nginx/snippets/
 sudo cp /opt/contigocare-admin/deploy/nginx/admin.contigo.care.conf        /etc/nginx/sites-available/
-sudo ln -sf /etc/nginx/sites-available/admin.contigo.care /etc/nginx/sites-enabled/
+# Keep the .conf on both sides — a symlink to a name that does not exist makes
+# `nginx -t` fail with `open() ".../sites-enabled/admin.contigo.care" failed`.
+sudo ln -sf /etc/nginx/sites-available/admin.contigo.care.conf /etc/nginx/sites-enabled/
 sudo rm -f /etc/nginx/sites-enabled/default
 
 # Hide the nginx version on responses generated outside this site's server block
