@@ -384,6 +384,7 @@ async def analyze_policy(
         analysis_id=str(run.id),
         patient_id=run.patient_id,
         status=run.status.value,
+        created_at=run.created_at.isoformat(),
         result=result,
         redaction_summary=redacted.summary,
         model_name=state.model_name,

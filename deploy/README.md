@@ -500,7 +500,9 @@ Get the certificate first, over plain HTTP — the hardened config references a
 certificate path that does not exist yet:
 
 ```bash
-sudo mkdir -p /var/www/html
+# -m 0755 explicitly: on a box hardened to `UMASK 027` a plain mkdir gives 0750
+# root:root, nginx cannot traverse it, and every ACME challenge answers 403.
+sudo install -d -m 0755 /var/www/html
 sudo certbot certonly --webroot -w /var/www/html -d admin.contigo.care \
   --agree-tos -m ops@contigo.care --no-eff-email
 ```

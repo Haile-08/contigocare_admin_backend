@@ -296,6 +296,9 @@ class AnalyzeResponse(BaseResponse):
         analysis_id: Primary key of the stored run, used to attach feedback.
         patient_id: Echoed back.
         status: Terminal state.
+        created_at: When the run happened, ISO 8601. The console derives the
+            run's human identifier and generation date from this, so it is on
+            the response the wizard reads and not only on the stored detail.
         result: The structured analysis, when it succeeded.
         redaction_summary: Counts per category, no values.
         model_name: Which model answered.
@@ -309,6 +312,7 @@ class AnalyzeResponse(BaseResponse):
     analysis_id: str
     patient_id: str
     status: str
+    created_at: str = ""
     result: Optional[AnalisisGMM] = None
     redaction_summary: dict = Field(default_factory=dict)
     model_name: str = ""
@@ -401,15 +405,17 @@ class AnalysisDetailResponse(AnalyzeResponse):
     here is what makes "open a policy and read it" possible without the service
     ever having stored the document.
 
+    ``created_at`` is inherited from :class:`AnalyzeResponse`, which is where it
+    now lives: the wizard shows the same run header as this screen, so both
+    responses have to carry it.
+
     Attributes:
-        created_at: When the run happened, ISO 8601.
         page_count: Pages in the original document.
         redacted_char_count: Size of the prompt that was sent.
         redacted_text: The saved, redacted policy.
         feedback: The reviewer's verdict, when one has been given.
     """
 
-    created_at: str
     page_count: int = 0
     redacted_char_count: int = 0
     redacted_text: str = ""
