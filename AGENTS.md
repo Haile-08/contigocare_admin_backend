@@ -31,7 +31,7 @@ uv run python scripts/create_admin.py reset-mfa --email x@contigo.care
 # The improvement loop (see docs/agent-improvement.md)
 uv run python evals/build_golden_set.py
 uv run python evals/main.py run
-uv run python evals/main.py compare --variant v1 --variant v2
+uv run python evals/main.py compare --variant v3 --variant v4
 ```
 
 ## How it is deployed
@@ -64,13 +64,13 @@ Two consequences worth knowing before you change anything:
 app/
   api/v1/
     auth.py          # Two-step login, enrolment, rotating refresh, password reset
-    insurance.py     # extract -> review -> analyze -> feedback; list + reopen
+    insurance.py     # extract -> review -> analyze -> feedback; list, reopen, erase
     dashboard.py     # Aggregates, computed in the database
   core/
     config.py        # Settings; refuses weak secrets at startup
     langgraph/
       insurance_agent.py   # extract -> verify -> critique
-    prompts/         # Versioned prompt files (extraction_v1.md, …)
+    prompts/         # Versioned prompt files (extraction_v3.md, …)
     metrics.py       # Prometheus, including redaction + hallucination counters
     middleware.py    # Logging context, security headers
   models/            # admin, refresh_token, analysis
@@ -162,8 +162,15 @@ There is **no checkpointer**, deliberately: it would write policy text to
 Postgres. The graph runs once, in memory, per request.
 
 Prompts are versioned files. Adding a version means adding
-`extraction_v2.md` and pointing `ANALYSIS_PROMPT_VERSION` at it. Never edit a
+`extraction_v4.md` and pointing `ANALYSIS_PROMPT_VERSION` at it. Never edit a
 shipped version in place — stored runs reference it.
+
+Deleting one is different, and is occasionally right. The output contract is
+generated from `AnalisisGMM` and appended at call time, not written in the
+prompt file, so a prompt naming sections the schema no longer has does not fail
+— it returns something plausible and wrong. A schema change that retires a
+version should delete it in the same change. `v1` and `v2` went that way with
+the seven-section schema; `v3` is the only runnable version.
 
 ## Working with Mexican documents
 
@@ -189,6 +196,9 @@ that raises accuracy *and* invention is a regression.
 ## Common Pitfalls to Avoid
 
 - ❌ Persisting the uploaded document in any form
+- ❌ Soft-deleting an analysis. `DELETE /insurance/analyses/{id}` is a hard
+  delete of the run and its verdict; a hidden row would tell an operator the
+  data was erased while the redacted policy is still in the table
 - ❌ Accepting pre-redacted text from the client
 - ❌ Adding a checkpointer, cache, or vector store over document content
 - ❌ Logging extracted values or detected entities

@@ -231,7 +231,14 @@ class Settings:
         # Extraction, not prose: near-zero temperature keeps the same policy
         # producing the same structured answer run over run.
         self.GEMINI_TEMPERATURE = float(os.getenv("GEMINI_TEMPERATURE", "0.0"))
-        self.GEMINI_MAX_OUTPUT_TOKENS = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "8192"))
+        # A full `AnalisisGMM` is a large object — around 48 evidence-carrying
+        # fields plus benefits, exclusions and bilingual findings — and on a
+        # thinking model the reasoning is billed against this same ceiling.
+        # Measured output for one extraction runs to roughly 4k tokens on
+        # flash-lite and 10k on flash, so 8192 truncated the better model
+        # mid-JSON and the truncation surfaced as a parse failure rather than as
+        # anything naming the limit.
+        self.GEMINI_MAX_OUTPUT_TOKENS = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "32768"))
         # Three nested budgets, and the order matters — an operator waiting on a
         # spinner is the thing being protected, not the model.
         #
@@ -250,7 +257,13 @@ class Settings:
         self.GEMINI_CALL_BUDGET_SECONDS = int(os.getenv("GEMINI_CALL_BUDGET_SECONDS", "90"))
         # The agent re-reads its own draft and repairs low-confidence fields.
         self.ANALYSIS_SELF_CRITIQUE_ENABLED = parse_bool_from_env("ANALYSIS_SELF_CRITIQUE_ENABLED", True)
-        self.ANALYSIS_PROMPT_VERSION = os.getenv("ANALYSIS_PROMPT_VERSION", "v1")
+        # v3 reorganises the extraction into the seven categories a broker
+        # reads a policy in, and adds what v2 could not compare across
+        # policies: the CNSF registration of the condiciones generales, the
+        # internal sublimits, age limits, tenure portability, and the renewal,
+        # agravación and cancellation clauses. v1 and v2 are kept on disk so
+        # runs stamped with them stay explicable.
+        self.ANALYSIS_PROMPT_VERSION = os.getenv("ANALYSIS_PROMPT_VERSION", "v3")
         # The ceiling on one `POST /analyze`: extraction plus a repair pass, so
         # roughly two call budgets. This is the number the client's own timeout
         # has to sit above — whichever of the two is smaller decides what the
@@ -394,6 +407,10 @@ class Settings:
             # because it is a browsing surface, not a model call.
             "analyses": ["120 per minute"],
             "feedback": ["60 per minute"],
+            # Erasure. Tighter than the browsing surface it sits on: this is the
+            # one route in the service that destroys stored evidence, and no
+            # operator working by hand needs more than a handful a minute.
+            "delete_analysis": ["10 per minute", "60 per hour"],
             "root": ["10 per minute"],
             "health": ["20 per minute"],
         }

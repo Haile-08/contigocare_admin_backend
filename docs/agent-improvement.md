@@ -26,7 +26,7 @@ The loop is already wired. What follows is how to run it.
               │
               │  same cases, two configurations
               ▼
-    evals/main.py compare --variant v1 --variant v2
+    evals/main.py compare --variant v3 --variant v4
               │
               │  five rates
               ▼
@@ -113,21 +113,28 @@ practice one or two fields carry most of the error.
 
 **Tuesday–Thursday — change exactly one thing.**
 
-Copy `extraction_v1.md` to `extraction_v2.md` and edit. One hypothesis per
-version. A version that changes the schema, the wording, and the temperature at
-once cannot be attributed to anything.
+Copy the current `extraction_v3.md` to `extraction_v4.md` and edit. One
+hypothesis per version. A version that changes the schema, the wording, and the
+temperature at once cannot be attributed to anything.
 
 **Friday — compare and decide.**
 
 ```bash
 uv run python evals/main.py compare \
   --golden evals/data/golden.jsonl \
-  --variant v1 --variant v2
+  --variant v3 --variant v4
 ```
 
-Ship `v2` by setting `ANALYSIS_PROMPT_VERSION=v2`. Keep `extraction_v1.md` in
+Ship `v4` by setting `ANALYSIS_PROMPT_VERSION=v4`. Keep `extraction_v3.md` in
 the repository: old runs recorded `prompt_version`, and deleting the file makes
 those runs unexplainable.
+
+The one exception is a version the schema has outgrown. The output contract is
+generated from `AnalisisGMM` and appended at call time, so a prompt naming
+sections the schema no longer has returns something plausible and wrong rather
+than failing. Delete such a version in the same change that retires it — a
+`prompt_version` with no file behind it is a smaller loss than one somebody can
+still select. `v1` and `v2` went that way with the seven-section schema.
 
 ---
 
@@ -175,7 +182,7 @@ dangerous combination, because the output looks complete and cited.
 
 ### Errors clustered on one insurer
 
-Sort failures by `datos_poliza.aseguradora`. GNP, AXA and Monterrey lay out a
+Sort failures by `identificacion.aseguradora`. GNP, AXA and Monterrey lay out a
 carátula very differently. A per-insurer example block in the prompt is cheap
 and targeted; a general rewrite is neither.
 
@@ -265,7 +272,7 @@ uv run python evals/build_golden_set.py --limit 500
 uv run python evals/main.py run --output evals/reports/$(date +%F).json
 
 # Compare prompt versions over identical cases
-uv run python evals/main.py compare --variant v1 --variant v2
+uv run python evals/main.py compare --variant v3 --variant v4
 
 # Gate a deploy in CI
 uv run python evals/main.py run --min-accuracy 0.85 --max-invention 0.02

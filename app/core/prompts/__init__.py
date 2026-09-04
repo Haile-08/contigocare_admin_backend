@@ -6,9 +6,21 @@ be attributed to the exact wording that produced it. Without the version stamp,
 "the agent got worse" is unattributable — you cannot tell a prompt edit from
 model drift, and the improvement loop stops working.
 
-Adding a version means adding ``extraction_v2.md`` and pointing
-``ANALYSIS_PROMPT_VERSION`` at ``v2``. The old file stays, so old runs remain
-explicable and the eval harness can score both against the same golden set.
+Adding a version means adding ``extraction_v4.md`` and pointing
+``ANALYSIS_PROMPT_VERSION`` at ``v4``. The previous file stays while it is still
+*runnable*, so old runs remain explicable and the eval harness can score both
+against the same golden set.
+
+A version stops being runnable when the schema moves out from under it. The
+output contract is not written in the prompt file — it is generated from
+:class:`AnalisisGMM` and appended at call time — so a prompt that names sections
+the schema no longer has is not "an older answer", it is prose describing one
+contract paired with a machine-readable demand for another. The model resolves
+that quietly and returns something plausible and wrong. When a schema change
+retires a version this way, delete the file with the change: a stored run's
+``prompt_version`` is then a label with no file behind it, which is a smaller
+loss than a version somebody can still select and get a wrong analysis from.
+``v1`` and ``v2`` went that way with the seven-section schema.
 """
 
 import os
@@ -59,12 +71,17 @@ def _read_template(name: str) -> str:
         return handle.read()
 
 
-def load_extraction_prompt(document_text: str, version: str = "v1") -> str:
+def load_extraction_prompt(document_text: str, version: str) -> str:
     """Build the first-pass extraction prompt.
 
     Args:
         document_text: The redacted policy text.
         version: Prompt version, matching a ``extraction_<version>.md`` file.
+            Required rather than defaulted: a default is a version number
+            written down in a second place, and the moment it falls behind
+            ``ANALYSIS_PROMPT_VERSION`` it silently pairs old wording with the
+            current schema — which produces a plausible, wrong analysis rather
+            than an error.
 
     Returns:
         str: The complete prompt.
@@ -76,13 +93,14 @@ def load_extraction_prompt(document_text: str, version: str = "v1") -> str:
     )
 
 
-def load_critique_prompt(document_text: str, draft_json: str, version: str = "v1") -> str:
+def load_critique_prompt(document_text: str, draft_json: str, version: str) -> str:
     """Build the self-critique prompt.
 
     Args:
         document_text: The same redacted text the draft was built from.
         draft_json: The first pass's output, serialised.
-        version: Prompt version.
+        version: Prompt version. Required, for the reason in
+            :func:`load_extraction_prompt`.
 
     Returns:
         str: The complete prompt.

@@ -1,7 +1,6 @@
 """Types for the offline evaluation harness."""
 
 from typing import (
-    Any,
     Optional,
 )
 
@@ -24,7 +23,7 @@ class GoldenCase(BaseModel):
             mined from reviewer corrections, ``manual`` for hand-written ones.
         redacted_text: The prompt input.
         expected: Flat map of dotted field path to expected value, e.g.
-            ``{"coberturas.deducible": "$15,000.00 M.N."}``. Only fields a
+            ``{"estructura_financiera.deducible": "$15,000.00 M.N."}``. Only fields a
             reviewer actually confirmed appear here; everything else is unjudged
             rather than assumed wrong.
         expected_absent: Field paths that must come back ``no_encontrado``.
@@ -119,21 +118,3 @@ class RunReport(BaseModel):
     mean_latency_ms: int = 0
     total_tokens: int = 0
     results: list[CaseResult] = Field(default_factory=list)
-
-    def summary_row(self) -> dict[str, Any]:
-        """Flatten the headline numbers for table output.
-
-        Returns:
-            dict: The comparable figures.
-        """
-        return {
-            "label": self.label,
-            "cases": self.cases,
-            "failures": self.failures,
-            "accuracy": self.field_accuracy,
-            "misses": self.miss_rate,
-            "inventions": self.invention_rate,
-            "grounding": self.grounding_rate,
-            "latency_ms": self.mean_latency_ms,
-            "tokens": self.total_tokens,
-        }

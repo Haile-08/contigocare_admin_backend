@@ -51,6 +51,7 @@ from app.core.prompts import (
     load_extraction_prompt,
 )
 from app.schemas.insurance import (
+    CAMPO_SECTIONS,
     AnalisisGMM,
     Campo,
     Confianza,
@@ -66,6 +67,7 @@ EVIDENCE_MATCH_THRESHOLD = 0.85
 
 # Below this many verified fields, a repair pass is worth its cost.
 MAX_CRITIQUE_ROUNDS = 1
+
 
 
 class AnalysisState(BaseModel):
@@ -330,7 +332,7 @@ class InsuranceAnalysisAgent:
         Yields:
             tuple: ``(path, campo)`` for each field carrying evidence.
         """
-        for section_name in ("datos_poliza", "coberturas"):
+        for section_name in CAMPO_SECTIONS:
             section = getattr(draft, section_name)
             for field_name in type(section).model_fields:
                 value = getattr(section, field_name)

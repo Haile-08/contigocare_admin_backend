@@ -142,6 +142,12 @@ analysis_feedback_total = Counter(
     ["verdict"],  # correct | partially_correct | incorrect
 )
 
+analysis_deletions_total = Counter(
+    "analysis_deletions_total",
+    "Analysis runs erased at an operator's request",
+    ["scope"],  # run | patient
+)
+
 
 def setup_metrics(app):
     """Set up Prometheus metrics middleware and endpoints.

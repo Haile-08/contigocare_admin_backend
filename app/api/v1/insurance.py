@@ -24,7 +24,10 @@ weaker in ways the server-side gate then refuses.
 import asyncio
 import uuid
 
-from typing import Optional
+from typing import (
+    Literal,
+    Optional,
+)
 
 from fastapi import (
     APIRouter,
@@ -43,6 +46,7 @@ from app.core.langgraph import insurance_agent
 from app.core.limiter import limiter
 from app.core.logging import logger
 from app.core.metrics import (
+    analysis_deletions_total,
     analysis_duration_seconds,
     analysis_evidence_failures_total,
     analysis_feedback_total,
@@ -67,6 +71,7 @@ from app.schemas.insurance import (
     AnalysisSummary,
     AnalyzeRequest,
     AnalyzeResponse,
+    DeletionResponse,
     ExtractResponse,
     FeedbackRequest,
     FeedbackResponse,
@@ -106,7 +111,12 @@ def summarize_run(run: AnalysisRun, verdict) -> AnalysisSummary:
         AnalysisSummary: The row.
     """
     result = run.result or {}
-    aseguradora = (result.get("datos_poliza", {}).get("aseguradora") or {}).get("valor")
+    # Read from both section names: the insurer moved from ``datos_poliza`` to
+    # ``identificacion`` with the v3 schema, and the list still has to name the
+    # carrier on runs stored before it. A row that goes blank on old analyses
+    # would read as an extraction failure rather than a rename.
+    identificacion = result.get("identificacion") or result.get("datos_poliza") or {}
+    aseguradora = (identificacion.get("aseguradora") or {}).get("valor")
     hallazgos = result.get("hallazgos", []) or []
 
     return AnalysisSummary(
@@ -553,6 +563,10 @@ async def get_analysis(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Análisis no encontrado.")
 
     feedback = await db.get_feedback_for_run(run.id)
+    # Read here rather than from a separate endpoint, because the only screen
+    # that needs it is this one: the erasure control has to name how many runs
+    # "everything for this patient" actually is before anyone presses it.
+    patient_analysis_count = await db.count_patient_analyses(run.patient_id)
 
     return AnalysisDetailResponse(
         analysis_id=str(run.id),
@@ -579,4 +593,75 @@ async def get_analysis(
             if feedback is not None
             else None
         ),
+        patient_analysis_count=patient_analysis_count,
+    )
+
+
+@router.delete("/analyses/{analysis_id}", response_model=DeletionResponse)
+@limiter.limit(settings.RATE_LIMIT_ENDPOINTS["delete_analysis"][0])
+async def delete_analysis(
+    request: Request,
+    analysis_id: uuid.UUID,
+    scope: Literal["run", "patient"] = Query(default="run"),
+    admin: Admin = Depends(get_current_admin),
+):
+    """Erase a stored analysis — or every analysis filed under its patient.
+
+    This is the console's answer to "remove this patient's data". There is
+    nothing else to remove: the uploaded document was never stored, so what a
+    run holds is the redacted text, the structured result and the reviewer's
+    verdict, and this deletes all three. Nothing is archived, tombstoned or
+    soft-deleted; a soft delete would leave the redacted policy in the table
+    while telling the operator it was gone.
+
+    The patient is identified from the run rather than from the URL, so an
+    identifier that belongs to a patient never travels through a path, a query
+    string, or the proxy access log that records both.
+
+    ``scope`` defaults to ``run``: the wider erasure is something a caller has
+    to ask for explicitly, never something a mistyped request falls into.
+
+    Args:
+        request: For rate limiting.
+        analysis_id: The run to erase, and the run whose patient defines the
+            wider scope.
+        scope: ``run`` for this analysis alone, ``patient`` for every analysis
+            of the same patient — this one included.
+        admin: The signed-in operator.
+
+    Returns:
+        DeletionResponse: What was removed.
+
+    Raises:
+        HTTPException: 404 when the run does not exist.
+    """
+    run = await db.get_analysis_run(analysis_id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Análisis no encontrado.")
+
+    patient_id = run.patient_id
+
+    if scope == "patient":
+        deleted_analyses, deleted_feedback = await db.delete_patient_analyses(patient_id)
+    else:
+        deleted_analyses, deleted_feedback = await db.delete_analysis_run(run.id)
+
+    analysis_deletions_total.labels(scope=scope).inc(deleted_analyses)
+
+    # The patient id stays out of the event for the same reason it stays out of
+    # the URL. What an audit needs from this line is who erased how much, and
+    # when; the id is in the response the operator is looking at.
+    logger.info(
+        "analysis_deleted",
+        analysis_id=str(analysis_id),
+        admin_id=str(admin.id),
+        scope=scope,
+        deleted_analyses=deleted_analyses,
+        deleted_feedback=deleted_feedback,
+    )
+
+    return DeletionResponse(
+        patient_id=patient_id,
+        deleted_analyses=deleted_analyses,
+        deleted_feedback=deleted_feedback,
     )

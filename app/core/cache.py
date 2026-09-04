@@ -4,7 +4,6 @@ If VALKEY_HOST is configured, uses Redis client to connect to Valkey for distrib
 Otherwise, falls back to a simple in-memory TTL cache.
 """
 
-import hashlib
 import time
 from typing import (
     TYPE_CHECKING,
@@ -192,21 +191,6 @@ def _create_cache_service() -> InMemoryCacheService | ValkeyCacheService:
         )
 
     return InMemoryCacheService(default_ttl=ttl)
-
-
-def cache_key(prefix: str, *parts: str) -> str:
-    """Build a cache key with a prefix and hashed parts.
-
-    Args:
-        prefix: The cache key prefix (e.g., "memory").
-        *parts: Additional parts to include in the key.
-
-    Returns:
-        A deterministic cache key string.
-    """
-    raw = ":".join(parts)
-    hashed = hashlib.sha256(raw.encode()).hexdigest()[:16]
-    return f"{prefix}:{hashed}"
 
 
 # Global cache service singleton — initialized lazily in lifespan

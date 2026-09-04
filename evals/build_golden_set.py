@@ -49,7 +49,7 @@ from evals.schemas import GoldenCase  # noqa: E402
 from evals.scoring import flatten_campos  # noqa: E402
 
 
-def _case_from(run: AnalysisRun, feedback: AnalysisFeedback) -> Optional[GoldenCase]:
+def _case_from(run: AnalysisRun, feedback: AnalysisFeedback) -> tuple[Optional[GoldenCase], int]:
     """Build a golden case from one reviewed run.
 
     Args:
@@ -57,16 +57,18 @@ def _case_from(run: AnalysisRun, feedback: AnalysisFeedback) -> Optional[GoldenC
         feedback: The reviewer's verdict.
 
     Returns:
-        Optional[GoldenCase]: The case, or None when there is nothing labelled
-        to learn from.
+        tuple: ``(case, stale_corrections)``. The case is None when there is
+        nothing labelled to learn from. The count is how many of the
+        reviewer's corrections named a field path the current schema no
+        longer has, so the caller can say so instead of losing them silently.
     """
     if not run.result or not run.redacted_text:
-        return None
+        return None, 0
 
     try:
         analysis = AnalisisGMM.model_validate(run.result)
     except Exception:
-        return None
+        return None, 0
 
     expected: dict[str, Optional[str]] = {}
     expected_absent: list[str] = []
@@ -76,8 +78,21 @@ def _case_from(run: AnalysisRun, feedback: AnalysisFeedback) -> Optional[GoldenC
             if campo.valor and campo.confianza != Confianza.NO_ENCONTRADO:
                 expected[path] = campo.valor
 
+    # Corrections are stored by dotted path, and a path is only meaningful
+    # against the schema that produced it. A run reviewed under an older schema
+    # carries paths this one no longer has — `coberturas.deducible` before the
+    # v3 sections, say — and `score_case` cannot tell a renamed field from one
+    # the agent failed to fill: it would find nothing at that path and record a
+    # permanent `missed` against every future run. Dropping them keeps the miss
+    # rate a statement about the agent rather than about a rename.
+    known_paths = set(flatten_campos(analysis))
+    stale = 0
+
     for path, correction in (feedback.field_corrections or {}).items():
         if not isinstance(correction, dict):
+            continue
+        if path not in known_paths:
+            stale += 1
             continue
         should_be = correction.get("should_be")
         if should_be in (None, "", "null"):
@@ -89,7 +104,7 @@ def _case_from(run: AnalysisRun, feedback: AnalysisFeedback) -> Optional[GoldenC
             expected[path] = str(should_be)
 
     if not expected and not expected_absent:
-        return None
+        return None, stale
 
     return GoldenCase(
         case_id=str(run.id),
@@ -100,9 +115,10 @@ def _case_from(run: AnalysisRun, feedback: AnalysisFeedback) -> Optional[GoldenC
         notes=(
             f"verdict={feedback.verdict.value}; model={run.model_name}; "
             f"prompt={run.prompt_version}"
+            + (f"; {stale} corrección(es) de campos que ya no existen" if stale else "")
             + (f"; {feedback.notes[:160]}" if feedback.notes else "")
         ),
-    )
+    ), stale
 
 
 async def build(output: Path, limit: int, include_unreviewed: bool) -> None:
@@ -142,8 +158,10 @@ async def build(output: Path, limit: int, include_unreviewed: bool) -> None:
             ).scalars().all()
 
     cases: list[GoldenCase] = []
+    stale_corrections = 0
     for run, feedback in rows:
-        case = _case_from(run, feedback)
+        case, stale = _case_from(run, feedback)
+        stale_corrections += stale
         if case is not None:
             cases.append(case)
 
@@ -169,6 +187,15 @@ async def build(output: Path, limit: int, include_unreviewed: bool) -> None:
     print(f"✓ {len(cases)} casos escritos en {output}")
     print(f"  etiquetados:            {labelled}")
     print(f"  ejemplos de invención:  {negatives}")
+    if stale_corrections:
+        # Not a warning about the data: it is a warning about the schema. These
+        # corrections were real, and they are unusable only because the field
+        # they name was renamed or removed.
+        print(
+            f"  ! {stale_corrections} corrección(es) descartada(s) por apuntar a campos que el\n"
+            "    esquema actual ya no tiene. Son revisiones hechas contra una versión\n"
+            "    anterior; vuelva a revisar esos análisis si quiere recuperarlas."
+        )
     if negatives == 0 and labelled:
         print(
             "  ! Sin ejemplos negativos. Pida a los revisores que marquen los campos\n"

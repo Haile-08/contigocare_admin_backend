@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """CLI for the insurance analysis evaluation harness.
 
-    # Score the current configuration
+Score the current configuration::
+
     uv run python evals/main.py run --golden evals/data/golden.jsonl
 
-    # Compare two prompt versions over the same cases
-    uv run python evals/main.py compare --golden evals/data/golden.jsonl \
-        --variant v1 --variant v2
+Compare two prompt versions over the same cases. Both must still be runnable
+against the current schema — a retired version is deleted, not kept for
+comparison, because it would be scored on a contract it never described::
 
-    # Gate a deploy: fail if accuracy drops or invention rises
+    uv run python evals/main.py compare --golden evals/data/golden.jsonl \
+        --variant v3 --variant v4
+
+Gate a deploy: fail if accuracy drops or invention rises::
+
     uv run python evals/main.py run --golden evals/data/golden.jsonl \
         --min-accuracy 0.85 --max-invention 0.02
 """
@@ -206,7 +211,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--variant",
         action="append",
         required=True,
-        help="Versión de prompt a evaluar. Repetir para comparar (p. ej. --variant v1 --variant v2).",
+        help="Versión de prompt a evaluar. Repetir para comparar (p. ej. --variant v3 --variant v4).",
     )
     compare_parser.set_defaults(handler=command_compare)
 

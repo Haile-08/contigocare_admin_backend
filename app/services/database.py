@@ -499,6 +499,97 @@ class DatabaseService:
 
         return [(row[0], row[1]) for row in rows], int(total or 0)
 
+    async def count_patient_analyses(self, patient_id: str) -> int:
+        """How many runs are filed under exactly this patient id.
+
+        Exact match, unlike the list filter's substring search: this figure is
+        what the console shows before an erasure ("delete all 4 analyses for
+        this patient"), and a count that included neighbouring ids would
+        understate or overstate what the button is about to destroy.
+
+        Args:
+            patient_id: The identifier as it was stored.
+
+        Returns:
+            int: The number of runs.
+        """
+        async with self.session_factory() as session:
+            result = await session.execute(
+                select(func.count())
+                .select_from(AnalysisRun)
+                .where(AnalysisRun.patient_id == patient_id)
+            )
+            return int(result.scalar_one() or 0)
+
+    async def delete_analysis_run(self, run_id: uuid.UUID) -> tuple[int, int]:
+        """Erase one run and the verdict attached to it.
+
+        Both deletes happen in one transaction, and the feedback goes first:
+        ``analysis_feedback.analysis_id`` is a foreign key onto the run, so the
+        other order fails on the constraint. A verdict that outlived its run
+        would also be an orphan the golden-set builder joins to nothing.
+
+        Args:
+            run_id: The run to erase.
+
+        Returns:
+            tuple: ``(runs_deleted, feedback_deleted)``. ``(0, 0)`` when the run
+            does not exist, which is how the route tells a 404 from a deletion.
+        """
+        async with self.session_factory() as session:
+            feedback_deleted = (
+                await session.execute(
+                    delete(AnalysisFeedback).where(AnalysisFeedback.analysis_id == run_id)
+                )
+            ).rowcount or 0
+
+            runs_deleted = (
+                await session.execute(delete(AnalysisRun).where(AnalysisRun.id == run_id))
+            ).rowcount or 0
+
+            await session.commit()
+
+        return int(runs_deleted), int(feedback_deleted)
+
+    async def delete_patient_analyses(self, patient_id: str) -> tuple[int, int]:
+        """Erase every run filed under one patient id, and their verdicts.
+
+        The match is **exact**. The list screen searches patient ids as a
+        substring because an operator is typing a remembered identifier into a
+        search box; erasure cannot work that way — ``ilike('%12%')`` would take
+        patient 12 and also patients 120, 312 and 1234 with it.
+
+        Args:
+            patient_id: The identifier as it was stored.
+
+        Returns:
+            tuple: ``(runs_deleted, feedback_deleted)``.
+        """
+        async with self.session_factory() as session:
+            # A subquery rather than "read the ids, then delete them": the ids
+            # are never needed in Python, and reading them first would open a
+            # window in which a run added between the two statements survives an
+            # erasure that reported it gone.
+            feedback_deleted = (
+                await session.execute(
+                    delete(AnalysisFeedback).where(
+                        AnalysisFeedback.analysis_id.in_(
+                            select(AnalysisRun.id).where(AnalysisRun.patient_id == patient_id)
+                        )
+                    )
+                )
+            ).rowcount or 0
+
+            runs_deleted = (
+                await session.execute(
+                    delete(AnalysisRun).where(AnalysisRun.patient_id == patient_id)
+                )
+            ).rowcount or 0
+
+            await session.commit()
+
+        return int(runs_deleted), int(feedback_deleted)
+
     async def document_seen_before(self, document_sha256: str) -> bool:
         """Whether this exact document has been analysed already.
 

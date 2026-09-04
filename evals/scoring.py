@@ -20,6 +20,7 @@ from typing import (
 )
 
 from app.schemas.insurance import (
+    CAMPO_SECTIONS,
     AnalisisGMM,
     Campo,
     Confianza,
@@ -82,7 +83,7 @@ def flatten_campos(analysis: AnalisisGMM) -> dict[str, Campo]:
         dict: Path to field.
     """
     flat: dict[str, Campo] = {}
-    for section_name in ("datos_poliza", "coberturas"):
+    for section_name in CAMPO_SECTIONS:
         section = getattr(analysis, section_name)
         for field_name in type(section).model_fields:
             value = getattr(section, field_name)

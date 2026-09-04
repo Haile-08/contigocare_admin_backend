@@ -11,6 +11,16 @@ before it is returned. A model that emits prose, truncated JSON, or a field of
 the wrong type produces an error here rather than an exception three layers up
 in a route handler.
 
+The schema is stated *in the prompt* rather than handed to the provider's
+``responseSchema`` field, which is the one place this file departs from the
+obvious implementation. Gemini caps that field somewhere near 200 properties;
+``AnalisisGMM`` is around 274, counting each ``Campo`` as the five it costs.
+Over the cap the request is refused with a 400 that names no field, no limit
+and no schema — it reads exactly like a provider outage, and it fails on every
+document rather than on unusual ones. Asking for the schema in the prompt has
+no such ceiling, so the model sees the same contract and the validation moves
+here, where a violation is already retried.
+
 **Safety filters.** Gemini's default filters are tuned for consumer chat, and a
 policy that enumerates covered conditions — oncology, HIV, psychiatric care,
 maternity complications — reads to those filters like medical content worth
@@ -24,8 +34,10 @@ cheaper model honestly.
 """
 
 import asyncio
+import json
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import (
     Any,
     Optional,
@@ -33,7 +45,10 @@ from typing import (
 )
 
 from langchain_core.messages import HumanMessage
-from pydantic import BaseModel
+from pydantic import (
+    BaseModel,
+    ValidationError,
+)
 from tenacity import (
     AsyncRetrying,
     RetryError,
@@ -93,6 +108,93 @@ _PERMISSIVE_SAFETY = {
 # handshake alone eat most of it, and the attempt would be cancelled mid-flight.
 _MIN_ATTEMPT_SECONDS = 5.0
 
+# Appended to every prompt, carrying the contract the provider's schema field
+# used to carry. The prompt files already close with "responde únicamente con el
+# objeto JSON que corresponde al esquema indicado"; this is what indicates it.
+_SCHEMA_INSTRUCTIONS = """
+
+# Esquema de salida
+
+Responde con un único objeto JSON que valide contra el siguiente JSON Schema.
+Resuelve las referencias `$ref` contra `$defs`. Incluye todas las claves de
+nivel superior, incluso cuando su contenido esté vacío. No envuelvas la
+respuesta en markdown ni antepongas explicación alguna.
+
+{schema_json}
+"""
+
+
+@lru_cache(maxsize=8)
+def _schema_block(schema: Type[BaseModel]) -> str:
+    """Render a schema as the prompt section that asks for it.
+
+    Cached because the text is fixed per schema and rebuilding it costs a full
+    JSON Schema walk on every call for a string that never changes.
+
+    Args:
+        schema: The Pydantic model the response must satisfy.
+
+    Returns:
+        str: The prompt section, ready to append.
+    """
+    return _SCHEMA_INSTRUCTIONS.format(
+        schema_json=json.dumps(schema.model_json_schema(), ensure_ascii=False)
+    )
+
+
+def _message_text(message: Any) -> str:
+    """Flatten a response message into plain text.
+
+    ``content`` is a string on some provider versions and a list of typed
+    blocks on others, and a Gemini answer carries a trailing signature block
+    alongside the text. Stringifying the list would feed that wrapper to the
+    JSON parser, so the text blocks are joined explicitly.
+
+    Args:
+        message: The response message.
+
+    Returns:
+        str: The concatenated text, empty when there is none.
+    """
+    content = getattr(message, "content", "")
+    if isinstance(content, str):
+        return content
+
+    parts: list[str] = []
+    for block in content or []:
+        if isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, dict) and block.get("type") == "text":
+            parts.append(block.get("text", ""))
+    return "".join(parts)
+
+
+def _strip_fences(text: str) -> str:
+    """Remove a markdown code fence the model was asked not to add.
+
+    ``response_mime_type`` makes this rare rather than impossible, and a fence
+    is a formatting slip around otherwise correct JSON — worth a two-line strip
+    instead of a retry that bills for the whole analysis again.
+
+    Args:
+        text: The raw response text.
+
+    Returns:
+        str: The text with any wrapping fence removed.
+    """
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+
+    segments = stripped.split("```")
+    if len(segments) < 2:
+        return stripped
+
+    body = segments[1].lstrip()
+    if body.startswith("json"):
+        body = body[4:]
+    return body.strip()
+
 
 class GeminiService:
     """Calls Gemini with retries, a model fallback, and schema validation."""
@@ -137,6 +239,11 @@ class GeminiService:
             # the SDK's own silent retry is turned off.
             max_retries=0,
             safety_settings=_PERMISSIVE_SAFETY,
+            # Constrains the decoder to emit syntactically valid JSON. This is
+            # not the schema field — it carries no property limit — and it
+            # removes the "```json" preamble from the failure modes without
+            # constraining which keys may appear.
+            response_mime_type="application/json",
         )
 
         self._models[model_name] = model
@@ -244,9 +351,7 @@ class GeminiService:
             ModelCallError: If the retries or the budget are exhausted.
         """
         model = self._get_model(model_name)
-        # `include_raw` keeps the underlying message alongside the parsed object,
-        # which is the only way to read usage metadata off a structured call.
-        structured = model.with_structured_output(schema, include_raw=True)
+        message = HumanMessage(content=prompt + _schema_block(schema))
 
         started = time.perf_counter()
         deadline = time.monotonic() + budget_seconds
@@ -274,7 +379,7 @@ class GeminiService:
                         raise ModelCallError(f"{model_name} ran out of budget")
 
                     response = await asyncio.wait_for(
-                        structured.ainvoke([HumanMessage(content=prompt)]),
+                        model.ainvoke([message]),
                         timeout=min(float(settings.GEMINI_TIMEOUT_SECONDS), remaining),
                     )
                     return self._interpret(response, schema, model_name, started, purpose)
@@ -291,10 +396,10 @@ class GeminiService:
         started: float,
         purpose: str,
     ) -> ModelResult:
-        """Turn a raw structured-output response into a ``ModelResult``.
+        """Validate a response message into a ``ModelResult``.
 
         Args:
-            response: What ``with_structured_output(include_raw=True)`` returned.
+            response: The response message.
             schema: The expected schema.
             model_name: Which model answered.
             started: ``perf_counter`` value from before the call.
@@ -309,14 +414,8 @@ class GeminiService:
         """
         latency_ms = int((time.perf_counter() - started) * 1000)
 
-        raw = response.get("raw") if isinstance(response, dict) else None
-        parsed = response.get("parsed") if isinstance(response, dict) else response
-        parsing_error = response.get("parsing_error") if isinstance(response, dict) else None
-
-        finish_reason = ""
-        if raw is not None:
-            metadata = getattr(raw, "response_metadata", {}) or {}
-            finish_reason = str(metadata.get("finish_reason", "")).upper()
+        metadata = getattr(response, "response_metadata", {}) or {}
+        finish_reason = str(metadata.get("finish_reason", "")).upper()
 
         if finish_reason in {"SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT"}:
             logger.error("gemini_content_blocked", model=model_name, purpose=purpose, reason=finish_reason)
@@ -330,10 +429,23 @@ class GeminiService:
             # "invalid response", because the fix is a config change.
             raise ValueError("response truncated at max_output_tokens; raise GEMINI_MAX_OUTPUT_TOKENS")
 
-        if parsed is None or parsing_error is not None:
-            raise ValueError(f"model output did not match {schema.__name__}: {parsing_error}")
+        text = _strip_fences(_message_text(response))
+        if not text:
+            raise ValueError(f"model returned an empty response (finish_reason={finish_reason or 'unknown'})")
 
-        input_tokens, output_tokens = self._read_usage(raw)
+        try:
+            parsed = schema.model_validate_json(text)
+        except ValidationError as exc:
+            # The count and the shape of the failure, never the content: a
+            # validation message quotes the input that failed, and the input
+            # here is policy text. `json_invalid` means the response was
+            # truncated or interrupted without `finish_reason` saying so;
+            # anything else means the JSON was well-formed but off-contract.
+            malformed = any(error.get("type") == "json_invalid" for error in exc.errors())
+            detail = "response was not valid JSON" if malformed else f"{exc.error_count()} field(s) invalid"
+            raise ValueError(f"model output did not match {schema.__name__}: {detail}") from exc
+
+        input_tokens, output_tokens = self._read_usage(response)
 
         logger.info(
             "gemini_call_succeeded",
@@ -357,7 +469,7 @@ class GeminiService:
         """Read token counts off a response, tolerating provider differences.
 
         Args:
-            raw: The underlying message, or None.
+            raw: The response message, or None.
 
         Returns:
             tuple: ``(input_tokens, output_tokens)``; zeros when unavailable.
