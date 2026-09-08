@@ -261,13 +261,12 @@ class Settings:
         self.GEMINI_CALL_BUDGET_SECONDS = int(os.getenv("GEMINI_CALL_BUDGET_SECONDS", "90"))
         # The agent re-reads its own draft and repairs low-confidence fields.
         self.ANALYSIS_SELF_CRITIQUE_ENABLED = parse_bool_from_env("ANALYSIS_SELF_CRITIQUE_ENABLED", True)
-        # v3 reorganises the extraction into the seven categories a broker
-        # reads a policy in, and adds what v2 could not compare across
-        # policies: the CNSF registration of the condiciones generales, the
+        # v1 organises the extraction into the seven categories a broker reads a
+        # policy in: the CNSF registration of the condiciones generales, the
         # internal sublimits, age limits, tenure portability, and the renewal,
-        # agravación and cancellation clauses. v1 and v2 are kept on disk so
-        # runs stamped with them stay explicable.
-        self.ANALYSIS_PROMPT_VERSION = os.getenv("ANALYSIS_PROMPT_VERSION", "v3")
+        # agravación and cancellation clauses. It is the only version on disk —
+        # a second one arrives as v2 when the eval harness says it beats this.
+        self.ANALYSIS_PROMPT_VERSION = os.getenv("ANALYSIS_PROMPT_VERSION", "v1")
         # The ceiling on one `POST /analyze`: extraction plus a repair pass, so
         # roughly two call budgets. This is the number the client's own timeout
         # has to sit above — whichever of the two is smaller decides what the

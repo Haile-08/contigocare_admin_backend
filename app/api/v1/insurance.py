@@ -112,7 +112,7 @@ def summarize_run(run: AnalysisRun, verdict) -> AnalysisSummary:
     """
     result = run.result or {}
     # Read from both section names: the insurer moved from ``datos_poliza`` to
-    # ``identificacion`` with the v3 schema, and the list still has to name the
+    # ``identificacion`` with the current schema, and the list still has to name the
     # carrier on runs stored before it. A row that goes blank on old analyses
     # would read as an extraction failure rather than a rename.
     identificacion = result.get("identificacion") or result.get("datos_poliza") or {}

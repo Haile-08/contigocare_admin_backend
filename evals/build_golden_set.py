@@ -81,7 +81,7 @@ def _case_from(run: AnalysisRun, feedback: AnalysisFeedback) -> tuple[Optional[G
     # Corrections are stored by dotted path, and a path is only meaningful
     # against the schema that produced it. A run reviewed under an older schema
     # carries paths this one no longer has — `coberturas.deducible` before the
-    # v3 sections, say — and `score_case` cannot tell a renamed field from one
+    # v1 sections, say — and `score_case` cannot tell a renamed field from one
     # the agent failed to fill: it would find nothing at that path and record a
     # permanent `missed` against every future run. Dropping them keeps the miss
     # rate a statement about the agent rather than about a rename.

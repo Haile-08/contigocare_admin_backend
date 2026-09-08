@@ -130,7 +130,7 @@ analysis an operator reviews becomes a labelled example, and
 
 ```bash
 uv run python evals/build_golden_set.py
-uv run python evals/main.py compare --variant v3 --variant v4
+uv run python evals/main.py compare --variant v1 --variant v2
 ```
 
 Scoring is deterministic — string comparison against reviewer-confirmed values,
@@ -161,7 +161,7 @@ knowing:
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `GEMINI_MODEL` | `gemini-3.5-flash` | Paired with `GEMINI_FALLBACK_MODEL` (`gemini-3.5-flash-lite`). One-line switch, but run the eval loop after changing it. |
-| `ANALYSIS_PROMPT_VERSION` | `v3` | Selects `app/core/prompts/extraction_<v>.md`. Stored on every run. `v3` organises the extraction into the seven categories a broker reads a policy in, and adds the CNSF registration, the internal sublimits, age limits, tenure portability, and the renewal, agravación and cancellation clauses. |
+| `ANALYSIS_PROMPT_VERSION` | `v1` | Selects `app/core/prompts/extraction_<v>.md`. Stored on every run. Startup refuses a version with no file behind it. `v1` organises the extraction into the seven categories a broker reads a policy in, and adds the CNSF registration, the internal sublimits, age limits, tenure portability, and the renewal, agravación and cancellation clauses. |
 | `ANALYSIS_SELF_CRITIQUE_ENABLED` | `true` | The repair pass. Roughly doubles cost on documents that need it. |
 | `REDACTION_ENFORCE_ON_SUBMIT` | `true` | The server-side gate. Turn off only with a very good reason. |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `15` | The token lives in memory, so this is the XSS blast radius. |

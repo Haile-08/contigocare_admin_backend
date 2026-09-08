@@ -10,7 +10,7 @@ against the current schema — a retired version is deleted, not kept for
 comparison, because it would be scored on a contract it never described::
 
     uv run python evals/main.py compare --golden evals/data/golden.jsonl \
-        --variant v3 --variant v4
+        --variant v1 --variant v2
 
 Gate a deploy: fail if accuracy drops or invention rises::
 
@@ -211,7 +211,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--variant",
         action="append",
         required=True,
-        help="Versión de prompt a evaluar. Repetir para comparar (p. ej. --variant v3 --variant v4).",
+        help="Versión de prompt a evaluar. Repetir para comparar (p. ej. --variant v1 --variant v2).",
     )
     compare_parser.set_defaults(handler=command_compare)
 

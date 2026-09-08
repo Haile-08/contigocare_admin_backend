@@ -6,10 +6,11 @@ be attributed to the exact wording that produced it. Without the version stamp,
 "the agent got worse" is unattributable — you cannot tell a prompt edit from
 model drift, and the improvement loop stops working.
 
-Adding a version means adding ``extraction_v4.md`` and pointing
-``ANALYSIS_PROMPT_VERSION`` at ``v4``. The previous file stays while it is still
-*runnable*, so old runs remain explicable and the eval harness can score both
-against the same golden set.
+``v1`` is the current wording and the only version on disk: the seven-category
+extraction a broker reads a policy in. Adding a version means adding
+``extraction_v2.md`` and pointing ``ANALYSIS_PROMPT_VERSION`` at ``v2``. The
+previous file stays while it is still *runnable*, so old runs remain explicable
+and the eval harness can score both against the same golden set.
 
 A version stops being runnable when the schema moves out from under it. The
 output contract is not written in the prompt file — it is generated from
@@ -20,7 +21,11 @@ that quietly and returns something plausible and wrong. When a schema change
 retires a version this way, delete the file with the change: a stored run's
 ``prompt_version`` is then a label with no file behind it, which is a smaller
 loss than a version somebody can still select and get a wrong analysis from.
-``v1`` and ``v2`` went that way with the seven-section schema.
+
+Renumbering an existing version is the one edit to avoid. The label is stamped
+onto every stored run, so moving the current wording to a number that already
+meant something else makes two different prompts indistinguishable in the
+table — and the improvement loop reads that column to attribute a regression.
 """
 
 import os
@@ -51,7 +56,7 @@ def available_versions() -> list[str]:
     needs repairing — long after whoever deployed it has stopped watching.
 
     Returns:
-        list[str]: Runnable version labels, e.g. ``["v3"]``.
+        list[str]: Runnable version labels, e.g. ``["v1"]``.
     """
     names = set(os.listdir(_PROMPTS_DIR))
     versions = [
@@ -72,9 +77,10 @@ def assert_version_available(version: str) -> None:
     policy and approved its redactions — the most expensive possible moment to
     discover a one-word config error, and a bare 500 when it happens.
 
-    Retired versions are the live risk here rather than typos. ``v1`` and ``v2``
-    were deleted when the seven-section schema changed, so a credential still
-    pinned to one names a version that was valid when it was written.
+    Drift between the credential and the repository is the live risk here rather
+    than typos: production settings arrive as an encrypted systemd credential,
+    so a version that no longer exists is invisible in a diff and shows up only
+    as a refusal to boot.
 
     Args:
         version: The configured version label.
@@ -89,8 +95,8 @@ def assert_version_available(version: str) -> None:
     raise RuntimeError(
         f"ANALYSIS_PROMPT_VERSION is {version!r}, which is not on disk. "
         f"Runnable versions: {', '.join(runnable) or 'none'}. "
-        "A version is deleted when a schema change retires it, so a stale value here "
-        "names a version that used to exist."
+        "In production this setting comes from the encrypted systemd credential, not "
+        "from a file in the repository — check there first, or unset it to take the default."
     )
 
 
