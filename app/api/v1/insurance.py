@@ -348,6 +348,35 @@ async def analyze_policy(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="El servicio de análisis no está disponible en este momento. Intente de nuevo.",
         )
+    except Exception as exc:
+        # The three cases above are the ones the agent raises deliberately.
+        # Anything else — a missing prompt file, a graph that would not build, a
+        # library raising something new after an upgrade — used to leave the ASGI
+        # layer to answer, which it does with an untranslated "Internal Server
+        # Error" and no stored run. The operator then sees a generic failure in
+        # English on a screen that is otherwise entirely in Spanish, and the
+        # dashboard shows nothing happened at all.
+        analysis_runs_total.labels(status=AnalysisStatus.FAILED.value).inc()
+
+        # Best effort: if the database is what broke, the operator is still owed
+        # an answer, so a failure to record must not replace the real error.
+        try:
+            await _record_failure(payload, admin, redacted, f"{type(exc).__name__}: {exc}")
+        except Exception:
+            logger.exception("analysis_failure_not_recorded", admin_id=str(admin.id))
+
+        logger.exception(
+            "analysis_failed_unexpectedly",
+            admin_id=str(admin.id),
+            error_type=type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                "El análisis falló por un error interno del servidor. "
+                "Intente de nuevo; si el problema persiste, repórtelo al equipo técnico."
+            ),
+        )
 
     result: AnalisisGMM = state.draft
 
@@ -462,6 +491,12 @@ async def submit_feedback(
     """
     run = await db.get_analysis_run(analysis_id)
     if run is None:
+        logger.warning(
+            "analysis_not_found",
+            operation="submit_feedback",
+            analysis_id=str(analysis_id),
+            admin_id=str(admin.id),
+        )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Análisis no encontrado.")
 
     try:
@@ -560,6 +595,12 @@ async def get_analysis(
     """
     run = await db.get_analysis_run(analysis_id)
     if run is None:
+        logger.warning(
+            "analysis_not_found",
+            operation="get_analysis",
+            analysis_id=str(analysis_id),
+            admin_id=str(admin.id),
+        )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Análisis no encontrado.")
 
     feedback = await db.get_feedback_for_run(run.id)
@@ -637,6 +678,13 @@ async def delete_analysis(
     """
     run = await db.get_analysis_run(analysis_id)
     if run is None:
+        logger.warning(
+            "analysis_not_found",
+            operation="delete_analysis",
+            analysis_id=str(analysis_id),
+            admin_id=str(admin.id),
+            scope=scope,
+        )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Análisis no encontrado.")
 
     patient_id = run.patient_id

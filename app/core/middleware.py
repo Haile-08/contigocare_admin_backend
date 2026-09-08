@@ -13,6 +13,7 @@ from asgi_correlation_id import correlation_id
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
+from starlette.routing import Match
 
 from app.core.config import settings
 from app.core.logging import (
@@ -46,6 +47,50 @@ else:
         PYINSTRUMENT_AVAILABLE = False
 
 
+#: Label value for a request no route claimed. Every unrouted path shares it,
+#: which is the point: a scanner walking /wp-admin, /.env, /phpmyadmin must add
+#: no series at all.
+UNMATCHED_ROUTE = "unmatched"
+
+
+def route_template(request: Request) -> str:
+    """The matched route's path template, for use as a metric label.
+
+    ``request.url.path`` contains whatever the caller put in the URL — an
+    analysis UUID, an admin id — so labelling a metric with it mints a fresh
+    Prometheus series for every record anyone ever opens, and those series are
+    never reclaimed. The template
+    (``/api/v1/insurance/analyses/{analysis_id}``) collapses them into one.
+
+    The match is recomputed here rather than read from the scope because
+    Starlette does not record which route won: 0.46 sets only ``endpoint`` and
+    ``path_params``. That is a few dozen compiled-regex tests on a handler that
+    goes on to talk to Postgres and, on the analysis routes, to Gemini.
+
+    Args:
+        request: The request being measured.
+
+    Returns:
+        str: The route's path template, or ``UNMATCHED_ROUTE`` when nothing
+        matched.
+    """
+    partial: str | None = None
+
+    for route in request.app.router.routes:
+        match, _ = route.matches(request.scope)
+
+        if match is Match.FULL:
+            return getattr(route, "path", UNMATCHED_ROUTE)
+
+        # The path matched but the method did not — a 405. Worth labelling with
+        # the real template rather than lumping in with the unrouted, but only
+        # if no later route claims the request outright.
+        if match is Match.PARTIAL and partial is None:
+            partial = getattr(route, "path", None)
+
+    return partial or UNMATCHED_ROUTE
+
+
 class MetricsMiddleware(BaseHTTPMiddleware):
     """Middleware for tracking HTTP request metrics."""
 
@@ -63,6 +108,10 @@ class MetricsMiddleware(BaseHTTPMiddleware):
         start_time = time.time()
         status_code = 500
 
+        # Resolved before the request runs, against a scope the router has not
+        # yet written its own keys into.
+        endpoint = route_template(request)
+
         try:
             response = await call_next(request)
             status_code = response.status_code
@@ -72,9 +121,9 @@ class MetricsMiddleware(BaseHTTPMiddleware):
             duration = time.time() - start_time
 
             # Record metrics
-            http_requests_total.labels(method=request.method, endpoint=request.url.path, status=status_code).inc()
+            http_requests_total.labels(method=request.method, endpoint=endpoint, status=status_code).inc()
 
-            http_request_duration_seconds.labels(method=request.method, endpoint=request.url.path).observe(duration)
+            http_request_duration_seconds.labels(method=request.method, endpoint=endpoint).observe(duration)
 
         return response
 

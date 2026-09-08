@@ -38,6 +38,61 @@ _PROMPTS_DIR = os.path.dirname(__file__)
 # analysis, since no real policy contains it.
 _DELIMITER_BREAKOUT = re.compile(r"</?\s*documento_poliza\s*>", re.IGNORECASE)
 
+# Matches the extraction half of a version pair, which is what names a version.
+_VERSION_FILE = re.compile(r"^extraction_(v\d+)\.md$")
+
+
+def available_versions() -> list[str]:
+    """Every prompt version that is actually runnable, oldest first.
+
+    A version counts only when *both* halves are on disk. The critique pass runs
+    only when verify finds something wrong, so a half-shipped version survives a
+    smoke test on a clean document and fails hours later on the first policy that
+    needs repairing — long after whoever deployed it has stopped watching.
+
+    Returns:
+        list[str]: Runnable version labels, e.g. ``["v3"]``.
+    """
+    names = set(os.listdir(_PROMPTS_DIR))
+    versions = [
+        match.group(1)
+        for name in names
+        if (match := _VERSION_FILE.match(name)) and f"critique_{match.group(1)}.md" in names
+    ]
+    return sorted(versions, key=lambda version: int(version[1:]))
+
+
+def assert_version_available(version: str) -> None:
+    """Refuse a prompt version that is not on disk.
+
+    Called at startup so a bad ``ANALYSIS_PROMPT_VERSION`` fails the deploy
+    rather than the request. The alternative is what it replaces: the service
+    boots clean, serves auth and extraction normally, and raises
+    ``FileNotFoundError`` inside the agent only once an operator has uploaded a
+    policy and approved its redactions — the most expensive possible moment to
+    discover a one-word config error, and a bare 500 when it happens.
+
+    Retired versions are the live risk here rather than typos. ``v1`` and ``v2``
+    were deleted when the seven-section schema changed, so a credential still
+    pinned to one names a version that was valid when it was written.
+
+    Args:
+        version: The configured version label.
+
+    Raises:
+        RuntimeError: If no such version is fully present.
+    """
+    runnable = available_versions()
+    if version in runnable:
+        return
+
+    raise RuntimeError(
+        f"ANALYSIS_PROMPT_VERSION is {version!r}, which is not on disk. "
+        f"Runnable versions: {', '.join(runnable) or 'none'}. "
+        "A version is deleted when a schema change retires it, so a stale value here "
+        "names a version that used to exist."
+    )
+
 
 def _neutralize_delimiters(text: str) -> str:
     """Strip sequences that would close the document block early.

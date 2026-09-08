@@ -11,6 +11,10 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+# Safe to import here: the prompts module depends on nothing inside `app`, so
+# this cannot close an import cycle back through settings.
+from app.core.prompts import assert_version_available
+
 
 # Exact placeholder values that have shipped in a template at some point. Kept
 # as literals because each one is a specific string a real deployment may still
@@ -432,6 +436,7 @@ class Settings:
 
         # Validated last, so an override can't slip past the check.
         self.validate_secrets()
+        self.validate_prompt_version()
 
     def apply_environment_settings(self):
         """Apply environment-specific settings based on the current environment."""
@@ -470,6 +475,22 @@ class Settings:
             # Only override if the environment variable wasn't explicitly set
             if key.upper() not in os.environ:
                 setattr(self, key, value)
+
+    def validate_prompt_version(self):
+        """Reject a prompt version with no files behind it.
+
+        The agent reads its prompts from disk per request, so an unknown version
+        is not caught by anything until the first analysis — see
+        :func:`app.core.prompts.assert_version_available` for why that is the
+        wrong place to find out.
+
+        Raises:
+            RuntimeError: If ``ANALYSIS_PROMPT_VERSION`` names no runnable version.
+        """
+        if self.ENVIRONMENT == Environment.TEST:
+            return
+
+        assert_version_available(self.ANALYSIS_PROMPT_VERSION)
 
     def validate_secrets(self):
         """Reject empty, short, or placeholder secrets outside test runs.
