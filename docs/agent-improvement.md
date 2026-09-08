@@ -113,9 +113,18 @@ practice one or two fields carry most of the error.
 
 **Tuesday–Thursday — change exactly one thing.**
 
-Copy the current `extraction_v1.md` to `extraction_v2.md` and edit. One
-hypothesis per version. A version that changes the schema, the wording, and the
-temperature at once cannot be attributed to anything.
+Copy `extraction_v1.md` to `extraction_v2.md` **and** `critique_v1.md` to
+`critique_v2.md`, then edit. Both halves are required: the critique pass runs
+only when verify finds a problem, so a version missing it would pass a smoke
+test on a clean document and fail hours later on the first policy that needs
+repairing. Startup refuses a half-shipped version and names the missing file.
+
+Adding the files changes nothing on its own — the running version is still
+whatever `ANALYSIS_PROMPT_VERSION` says. That gap is deliberate: it is where the
+candidate gets scored before anyone runs a real policy through it.
+
+One hypothesis per version. A version that changes the schema, the wording, and
+the temperature at once cannot be attributed to anything.
 
 **Friday — compare and decide.**
 

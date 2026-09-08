@@ -92,11 +92,22 @@ def assert_version_available(version: str) -> None:
     if version in runnable:
         return
 
+    # Name the missing half explicitly. The likeliest way to land here while
+    # shipping a new version is adding `extraction_v2.md` and forgetting
+    # `critique_v2.md`, and "v2 is not on disk" is a confusing thing to read
+    # when you are looking straight at a file called extraction_v2.md.
+    missing = [
+        filename
+        for filename in (f"extraction_{version}.md", f"critique_{version}.md")
+        if not os.path.isfile(os.path.join(_PROMPTS_DIR, filename))
+    ]
+
     raise RuntimeError(
-        f"ANALYSIS_PROMPT_VERSION is {version!r}, which is not on disk. "
-        f"Runnable versions: {', '.join(runnable) or 'none'}. "
-        "In production this setting comes from the encrypted systemd credential, not "
-        "from a file in the repository — check there first, or unset it to take the default."
+        f"ANALYSIS_PROMPT_VERSION is {version!r}, which is not runnable — missing "
+        f"{', '.join(missing)}. Runnable versions: {', '.join(runnable) or 'none'}. "
+        "A version needs both halves. In production this setting comes from the "
+        "encrypted systemd credential rather than a file in the repository, so check "
+        "there when it disagrees with what is on disk."
     )
 
 
