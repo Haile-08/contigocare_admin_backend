@@ -91,7 +91,7 @@ def validate_password_strength(password: str) -> bool:
     if not re.search(r"\d", password):
         raise ValueError("La contraseña debe contener al menos un número")
 
-    if password.lower() in {"contrasena123", "password1234", "administrador1", "contigocare1"}:
+    if password.lower() in {"contrasena123", "password1234", "administrador1", "contigocare1", "karaihealth1"}:
         raise ValueError("La contraseña es demasiado común")
 
     return True

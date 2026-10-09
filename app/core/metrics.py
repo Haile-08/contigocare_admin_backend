@@ -148,6 +148,38 @@ analysis_deletions_total = Counter(
     ["scope"],  # run | patient
 )
 
+# ---------------------------------------------------------------------------
+# Navigation
+# ---------------------------------------------------------------------------
+
+navigation_runs_total = Counter(
+    "navigation_runs_total",
+    "Completed navigation runs",
+    ["status"],  # succeeded | failed | blocked_by_redaction
+)
+
+navigation_feedback_total = Counter(
+    "navigation_feedback_total",
+    "Reviewer verdicts recorded on navigations",
+    ["verdict"],  # correct | partially_correct | incorrect
+)
+
+# The six agents run one after another, as in InnovaDerm, so minutes not seconds.
+navigation_duration_seconds = Histogram(
+    "navigation_duration_seconds",
+    "Wall-clock time for one navigation, all agents included",
+    buckets=[30.0, 60.0, 120.0, 180.0, 300.0, 450.0, 600.0, 900.0],
+)
+
+# A rising degraded rate for one agent is that agent's prompt or schema
+# failing against the model — the navigation still completes on a fallback, so
+# nothing else makes it visible.
+navigation_agent_calls_total = Counter(
+    "navigation_agent_calls_total",
+    "Navigation agent model calls",
+    ["agent", "outcome"],  # outcome: ok | degraded
+)
+
 
 def setup_metrics(app):
     """Set up Prometheus metrics middleware and endpoints.

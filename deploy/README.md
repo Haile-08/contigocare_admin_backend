@@ -1,4 +1,4 @@
-# Deploying `admin.contigo.care`
+# Deploying `admin.karai.health`
 
 Ubuntu 24.04 VPS, zero to production. Every step is one block to copy.
 
@@ -21,23 +21,27 @@ Files in this folder:
 
 | | |
 | --- | --- |
-| `nginx/admin.contigo.care.conf` | The site: TLS, SPA, API proxy |
+| `nginx/admin.karai.health.conf` | The site: TLS, SPA, API proxy |
 | `nginx/cc-admin-rate-limit.conf` | Rate-limit zones (must live in `conf.d`) |
 | `nginx/cc-admin-security-headers.conf` | Security headers + CSP (must live in `snippets`) |
 | `systemd/contigocare-admin.service` | The API service, sandboxed |
 | `bin/contigocare-run` | Runs a one-off command with the secrets attached (§5.2) |
 | `update.sh` | Routine redeploy, one command |
 
+Moving an already-running server to a new hostname (the console moved from
+`admin.contigo.care` to `admin.karai.health` this way) is its own procedure —
+see [Changing the domain](#changing-the-domain).
+
 ---
 
 ## 1. DNS
 
-Point an **A record** for `admin.contigo.care` at the server's IPv4 address
+Point an **A record** for `admin.karai.health` at the server's IPv4 address
 (and `AAAA` at its IPv6, if it has one). Wait for it to resolve before step 8 —
 Let's Encrypt validates over HTTP and needs the name to reach this box.
 
 ```bash
-dig +short admin.contigo.care
+dig +short admin.karai.health
 ```
 
 ## 2. Packages
@@ -267,14 +271,14 @@ Start from `.env.example` and change them:
 ```ini
 APP_ENV=production
 DEBUG=false
-ALLOWED_ORIGINS="https://admin.contigo.care"
+ALLOWED_ORIGINS="https://admin.karai.health"
 
 JWT_SECRET_KEY='<from above>'
 ENCRYPTION_KEY='<from above>'
 GEMINI_API_KEY='<real key>'
 
 COOKIE_SECURE=true
-FRONTEND_BASE_URL=https://admin.contigo.care
+FRONTEND_BASE_URL=https://admin.karai.health
 
 POSTGRES_HOST=localhost
 POSTGRES_DB=contigocare
@@ -285,7 +289,7 @@ SMTP_HOST=<real host>          # password reset silently does nothing without it
 SMTP_PORT=587
 SMTP_USERNAME='<user>'
 SMTP_PASSWORD='<pass>'
-EMAIL_FROM=no-reply@contigo.care
+EMAIL_FROM=no-reply@karai.health
 
 LOG_LEVEL=INFO
 LOG_FORMAT=json
@@ -477,7 +481,7 @@ token included — to any browser extension:
 ```bash
 sudo tee /opt/contigocare-admin-frontend/.env.production >/dev/null <<'EOF'
 VITE_API_BASE_URL=/api/v1
-VITE_APP_NAME="ContigoCare Admin"
+VITE_APP_NAME="karai.health Admin"
 VITE_ENABLE_DEVTOOLS=false
 VITE_REQUEST_TIMEOUT_MS=120000
 EOF
@@ -491,7 +495,7 @@ sudo chown -R www-data:www-data /var/www/contigocare-admin
 ```
 
 `VITE_API_BASE_URL=/api/v1` is origin-relative on purpose: the browser only ever
-talks to `admin.contigo.care`, which keeps the refresh cookie same-site and means
+talks to `admin.karai.health`, which keeps the refresh cookie same-site and means
 no cross-origin CORS is needed in production.
 
 ## 8. nginx and TLS
@@ -503,8 +507,8 @@ certificate path that does not exist yet:
 # -m 0755 explicitly: on a box hardened to `UMASK 027` a plain mkdir gives 0750
 # root:root, nginx cannot traverse it, and every ACME challenge answers 403.
 sudo install -d -m 0755 /var/www/html
-sudo certbot certonly --webroot -w /var/www/html -d admin.contigo.care \
-  --agree-tos -m ops@contigo.care --no-eff-email
+sudo certbot certonly --webroot -w /var/www/html -d admin.karai.health \
+  --agree-tos -m ops@karai.health --no-eff-email
 ```
 
 Then install the three config files and swap the site in:
@@ -512,10 +516,10 @@ Then install the three config files and swap the site in:
 ```bash
 sudo cp /opt/contigocare-admin/deploy/nginx/cc-admin-rate-limit.conf      /etc/nginx/conf.d/
 sudo cp /opt/contigocare-admin/deploy/nginx/cc-admin-security-headers.conf /etc/nginx/snippets/
-sudo cp /opt/contigocare-admin/deploy/nginx/admin.contigo.care.conf        /etc/nginx/sites-available/
+sudo cp /opt/contigocare-admin/deploy/nginx/admin.karai.health.conf        /etc/nginx/sites-available/
 # Keep the .conf on both sides — a symlink to a name that does not exist makes
-# `nginx -t` fail with `open() ".../sites-enabled/admin.contigo.care" failed`.
-sudo ln -sf /etc/nginx/sites-available/admin.contigo.care.conf /etc/nginx/sites-enabled/
+# `nginx -t` fail with `open() ".../sites-enabled/admin.karai.health" failed`.
+sudo ln -sf /etc/nginx/sites-available/admin.karai.health.conf /etc/nginx/sites-enabled/
 sudo rm -f /etc/nginx/sites-enabled/default
 
 # Hide the nginx version on responses generated outside this site's server block
@@ -539,7 +543,7 @@ There is no registration endpoint. Accounts are created on the server, through
 
 ```bash
 sudo contigocare-run .venv/bin/python scripts/create_admin.py create \
-  --email ops@contigo.care --name "Ana Ruiz"
+  --email ops@karai.health --name "Ana Ruiz"
 ```
 
 The account has no authenticator yet. On first sign-in the console shows a QR
@@ -563,27 +567,27 @@ localhost only.
 
 ```bash
 # The API answers through the proxy (expect: {"status":"healthy"})
-curl -s https://admin.contigo.care/api/v1/health
+curl -s https://admin.karai.health/api/v1/health
 
 # The database is reachable. This one is localhost-only on purpose: it reports
 # the version and environment, which nothing outside the box needs to know.
 curl -s http://127.0.0.1:8001/health
 
 # The SPA shell is never cached (expect: no-cache)
-curl -sI https://admin.contigo.care/ | grep -i cache-control
+curl -sI https://admin.karai.health/ | grep -i cache-control
 
 # Hashed assets are cached forever (expect: immutable)
-asset=$(curl -s https://admin.contigo.care/ | grep -o '/assets/[^"]*\.js' | head -1)
-curl -sI "https://admin.contigo.care$asset" | grep -i cache-control
+asset=$(curl -s https://admin.karai.health/ | grep -o '/assets/[^"]*\.js' | head -1)
+curl -sI "https://admin.karai.health$asset" | grep -i cache-control
 
 # Exactly ONE copy of each security header on API responses (expect 1)
-curl -sI https://admin.contigo.care/api/v1/health | grep -ci x-frame-options
+curl -sI https://admin.karai.health/api/v1/health | grep -ci x-frame-options
 
 # Debug surfaces are closed (expect 404 on all three)
-for p in /docs /redoc /metrics; do curl -so /dev/null -w "$p %{http_code}\n" https://admin.contigo.care$p; done
+for p in /docs /redoc /metrics; do curl -so /dev/null -w "$p %{http_code}\n" https://admin.karai.health$p; done
 
 # Old TLS is refused (expect a handshake failure)
-openssl s_client -connect admin.contigo.care:443 -tls1_1 </dev/null
+openssl s_client -connect admin.karai.health:443 -tls1_1 </dev/null
 ```
 
 Then sign in and run one real policy through the wizard. Watch for CSP errors in
@@ -673,6 +677,182 @@ Do a real restore test once — a backup you have never decrypted is not a backu
 ```bash
 gpg --decrypt /var/backups/contigocare/db-$(date +%F).sql.gpg | head -20
 ```
+
+## Changing the domain
+
+How to move a running server from one hostname to another — for example from
+`admin.contigo.care` to `admin.karai.health`. Below, `OLD` is the current
+hostname and `NEW` the one you are moving to. Nothing needs to be reinstalled:
+the same service, database and secrets keep running, and only the parts that
+name the host change.
+
+### What names the host, and what does not
+
+The hostname appears in exactly these places:
+
+| Where | What | Why it matters |
+| --- | --- | --- |
+| DNS | `A` / `AAAA` record | Browsers and Let's Encrypt have to reach the box |
+| `/etc/letsencrypt/live/<host>/` | The TLS certificate | A certificate is valid for the names it was issued for, nothing else |
+| `deploy/nginx/<host>.conf` | `server_name` (twice) and the two `ssl_certificate` paths | nginx picks the site, and the certificate, by name |
+| The secrets (§5) | `ALLOWED_ORIGINS` | CORS and the refresh-cookie origin check. A wrong value is a sign-in that fails with no useful message |
+| The secrets (§5) | `FRONTEND_BASE_URL` | The password-reset link in the email is built from it. A wrong value sends people to the old host |
+| The secrets (§5) | `EMAIL_FROM` | The sender address, if the mail domain is changing too |
+| `deploy/update.sh` | The health-check URL on its last line | The deploy reports a failure if this URL does not answer |
+
+**Brand names are in the secrets too.** The credential was built from
+`.env.example`, so it sets `PROJECT_NAME`, `TOTP_ISSUER` and `EMAIL_FROM_NAME`
+explicitly, and those values win over the defaults in `app/core/config.py`.
+If the brand changes with the domain, edit them in the same sitting (step 3).
+The frontend's name comes from `VITE_APP_NAME` in
+`/opt/contigocare-admin-frontend/.env.production` and is built into the SPA
+(step 4).
+
+**These do not change, even though some still say `contigocare`.** They are
+internal names that users never see. Renaming any of them is a migration in its
+own right, not part of a domain change:
+
+| Name | Renaming it would… |
+| --- | --- |
+| `/opt/contigocare-admin`, `/var/www/contigocare-admin`, `contigocare-admin.service`, `contigocare-run`, `ccadmin` | …mean editing the unit, the wrapper, `update.sh` and this README together, and reinstalling all of them |
+| `contigocare.env` (the credential name) | …stop the service from starting. The name is sealed into the encrypted file (§5.5) |
+| `POSTGRES_DB=contigocare` | …need a database rename while the service is stopped |
+| `JWT_ISSUER` / `JWT_AUDIENCE` | …sign everyone out. Harmless but pointless |
+| `contigocare.fingerprint.v1` in `app/utils/crypto.py` | …invalidate every stored fingerprint |
+| `cc_auth` / `cc_api` zones, `cc_rt` / `cc_csrf` cookies | …gain nothing; the cookies are already scoped to whichever host set them |
+
+The CSP (`connect-src 'self'`) and `VITE_API_BASE_URL=/api/v1` are relative to
+whatever origin serves the page, so neither one names the host.
+
+### 1. DNS
+
+Add `A` (and `AAAA`, if the server has IPv6) records for `NEW` that point to
+the **same** server. Keep `OLD` pointing there too, so the redirect in step 6
+can answer. Wait until it resolves:
+
+```bash
+dig +short NEW     # must print this server's IP
+```
+
+### 2. Certificate for the new name
+
+The port-80 server block in the current config answers ACME challenges from
+`/var/www/html`. nginx sends a request for a name it does not recognise to the
+first server block on that port, so `NEW` is already served by it and the
+challenge passes without any nginx change:
+
+```bash
+sudo certbot certonly --webroot -w /var/www/html -d NEW \
+  --agree-tos -m ops@karai.health --no-eff-email
+ls /etc/letsencrypt/live/NEW/     # fullchain.pem privkey.pem …
+```
+
+### 3. Secrets
+
+Use the same procedure as **Rotate or change a secret** under Routine
+operations: decrypt into `/dev/shm`, edit, encrypt again, then shred. Change:
+
+```ini
+ALLOWED_ORIGINS="https://NEW"
+FRONTEND_BASE_URL=https://NEW
+EMAIL_FROM=no-reply@karai.health        # only if the mail domain changes
+# Only if the brand changes as well:
+PROJECT_NAME="karai.health Admin"
+TOTP_ISSUER="karai.health Admin"
+EMAIL_FROM_NAME=karai.health
+```
+
+Do not restart the service yet. If you do, the API will reject requests from
+the old origin while nginx is still serving it.
+
+If `EMAIL_FROM` moves to a new mail domain, set that domain up with the SMTP
+provider first (verify the domain, then publish its SPF, DKIM and DMARC
+records). Otherwise the reset emails go to spam or are rejected outright.
+
+### 4. Frontend name
+
+Only needed if the brand changes. The SPA reads its name at **build** time:
+
+```bash
+sudo sed -i 's/^VITE_APP_NAME=.*/VITE_APP_NAME="karai.health Admin"/' \
+    /opt/contigocare-admin-frontend/.env.production
+```
+
+Step 5's `update.sh` rebuilds the SPA with the new value.
+
+### 5. Code, nginx, restart
+
+First merge the commit that renames `deploy/nginx/OLD.conf` to
+`deploy/nginx/NEW.conf`, changes its `server_name` and certificate paths, and
+changes the URL at the end of `update.sh`. On the server:
+
+```bash
+# Pull both repos, rebuild the SPA, restart the API with the new secrets.
+# The health check at the end fails: NEW is not in nginx yet. Expected.
+sudo /opt/contigocare-admin/deploy/update.sh || true
+
+# Swap the nginx site
+sudo cp /opt/contigocare-admin/deploy/nginx/NEW.conf /etc/nginx/sites-available/
+sudo ln -sf /etc/nginx/sites-available/NEW.conf /etc/nginx/sites-enabled/
+sudo rm -f /etc/nginx/sites-enabled/OLD.conf
+sudo nginx -t && sudo systemctl reload nginx
+
+curl -s https://NEW/api/v1/health      # {"status":"healthy"}
+```
+
+Then go through every check in §11 with `NEW` in place of the hostname. Do
+step 6 straight after: until it is done, `OLD` lands on the `NEW` site and
+browsers show a certificate warning.
+
+### 6. Redirect the old name
+
+Bookmarks and password-reset emails that were already sent still point to
+`OLD`. Keep the old certificate and redirect everything to the new host. Do
+not proxy it: the refresh cookie and CORS only work on `NEW`.
+
+```bash
+sudo tee /etc/nginx/sites-available/OLD-redirect.conf >/dev/null <<'EOF'
+server {
+    listen 80;
+    listen [::]:80;
+    server_name OLD;
+    location /.well-known/acme-challenge/ { root /var/www/html; }
+    location / { return 301 https://NEW$request_uri; }
+}
+server {
+    listen 443 ssl http2;          # nginx 1.24 form; see the note in NEW.conf
+    listen [::]:443 ssl http2;
+    server_name OLD;
+    server_tokens off;
+    ssl_certificate     /etc/letsencrypt/live/OLD/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/OLD/privkey.pem;
+    return 301 https://NEW$request_uri;
+}
+EOF
+sudo ln -sf /etc/nginx/sites-available/OLD-redirect.conf /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+
+curl -sI https://OLD/login | grep -i '^location'   # → https://NEW/login
+```
+
+Reset links expire on their own, so the redirect only has to stay up as long
+as the old name has users. To retire `OLD` later, remove the redirect site,
+reload nginx, then run `sudo certbot delete --cert-name OLD` and delete the
+DNS record. Run them in that order: if the certificate goes first, `nginx -t`
+fails on the missing file.
+
+### What users will notice
+
+- **Everyone signs in again, once.** The refresh cookie belongs to `OLD`, and
+  the browser never sends it to `NEW`. Sign-in is still password plus TOTP.
+- **Authenticator apps keep working.** The TOTP secret does not depend on the
+  host. Existing entries keep their old label. Only accounts enrolled after the
+  change, or reset with `create_admin.py reset-mfa`, show the new
+  `TOTP_ISSUER`.
+- **Console preferences reset to the defaults:** theme, language and the
+  collapsed sidebar. They are stored per origin in the browser.
+- **Generated PDFs name the organisation in `app/core/navigator/branding.py`.**
+  That is code, not configuration, so it changes when the code is deployed.
 
 ## Two things that will bite you
 

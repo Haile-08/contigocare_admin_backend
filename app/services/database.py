@@ -50,6 +50,10 @@ from app.models.analysis import (
     FeedbackVerdict,
 )
 from app.models.base import utcnow
+from app.models.navigation import (
+    NavigationFeedback,
+    NavigationRun,
+)
 from app.models.password_reset_token import (
     PasswordResetToken,
     hash_reset_token,
@@ -521,22 +525,42 @@ class DatabaseService:
             )
             return int(result.scalar_one() or 0)
 
-    async def delete_analysis_run(self, run_id: uuid.UUID) -> tuple[int, int]:
-        """Erase one run and the verdict attached to it.
+    async def delete_analysis_run(self, run_id: uuid.UUID) -> tuple[int, int, int]:
+        """Erase one run, the verdict attached to it, and its navigations.
 
-        Both deletes happen in one transaction, and the feedback goes first:
-        ``analysis_feedback.analysis_id`` is a foreign key onto the run, so the
-        other order fails on the constraint. A verdict that outlived its run
-        would also be an orphan the golden-set builder joins to nothing.
+        All deletes happen in one transaction, and the children go first:
+        ``navigation_feedback.navigation_id`` points at a navigation, and
+        ``analysis_feedback.analysis_id`` and ``navigation_run.analysis_id`` are
+        foreign keys onto the run, so the other order fails on the constraint.
+        A verdict that outlived its run would also be an orphan the golden-set
+        builder joins to nothing, and a navigation that outlived it would be the
+        patient's clinical intake left behind by an erasure that reported
+        success.
 
         Args:
             run_id: The run to erase.
 
         Returns:
-            tuple: ``(runs_deleted, feedback_deleted)``. ``(0, 0)`` when the run
-            does not exist, which is how the route tells a 404 from a deletion.
+            tuple: ``(runs_deleted, feedback_deleted, navigations_deleted)``.
+            ``feedback_deleted`` counts verdicts on the run and on its
+            navigations. All zero when the run does not exist, which is how the
+            route tells a 404 from a deletion.
         """
         async with self.session_factory() as session:
+            navigation_feedback_deleted = (
+                await session.execute(
+                    delete(NavigationFeedback).where(
+                        NavigationFeedback.navigation_id.in_(
+                            select(NavigationRun.id).where(NavigationRun.analysis_id == run_id)
+                        )
+                    )
+                )
+            ).rowcount or 0
+
+            navigations_deleted = (
+                await session.execute(delete(NavigationRun).where(NavigationRun.analysis_id == run_id))
+            ).rowcount or 0
+
             feedback_deleted = (
                 await session.execute(
                     delete(AnalysisFeedback).where(AnalysisFeedback.analysis_id == run_id)
@@ -549,9 +573,9 @@ class DatabaseService:
 
             await session.commit()
 
-        return int(runs_deleted), int(feedback_deleted)
+        return int(runs_deleted), int(feedback_deleted) + int(navigation_feedback_deleted), int(navigations_deleted)
 
-    async def delete_patient_analyses(self, patient_id: str) -> tuple[int, int]:
+    async def delete_patient_analyses(self, patient_id: str) -> tuple[int, int, int]:
         """Erase every run filed under one patient id, and their verdicts.
 
         The match is **exact**. The list screen searches patient ids as a
@@ -563,9 +587,38 @@ class DatabaseService:
             patient_id: The identifier as it was stored.
 
         Returns:
-            tuple: ``(runs_deleted, feedback_deleted)``.
+            tuple: ``(runs_deleted, feedback_deleted, navigations_deleted)``.
+            ``feedback_deleted`` counts verdicts on the runs and on their
+            navigations.
         """
         async with self.session_factory() as session:
+            navigation_feedback_deleted = (
+                await session.execute(
+                    delete(NavigationFeedback).where(
+                        NavigationFeedback.navigation_id.in_(
+                            select(NavigationRun.id).where(
+                                NavigationRun.analysis_id.in_(
+                                    select(AnalysisRun.id).where(AnalysisRun.patient_id == patient_id)
+                                )
+                            )
+                        )
+                    )
+                )
+            ).rowcount or 0
+
+            # Navigations are matched through their analysis rather than their
+            # own patient_id column: the two always agree, but the erasure is
+            # defined by the analyses, and a navigation must never outlive one.
+            navigations_deleted = (
+                await session.execute(
+                    delete(NavigationRun).where(
+                        NavigationRun.analysis_id.in_(
+                            select(AnalysisRun.id).where(AnalysisRun.patient_id == patient_id)
+                        )
+                    )
+                )
+            ).rowcount or 0
+
             # A subquery rather than "read the ids, then delete them": the ids
             # are never needed in Python, and reading them first would open a
             # window in which a run added between the two statements survives an
@@ -588,7 +641,7 @@ class DatabaseService:
 
             await session.commit()
 
-        return int(runs_deleted), int(feedback_deleted)
+        return int(runs_deleted), int(feedback_deleted) + int(navigation_feedback_deleted), int(navigations_deleted)
 
     async def document_seen_before(self, document_sha256: str) -> bool:
         """Whether this exact document has been analysed already.
@@ -676,6 +729,172 @@ class DatabaseService:
                 .limit(1)
             )
             return result.scalar_one_or_none()
+
+    # ------------------------------------------------------------------
+    # Navigations
+    # ------------------------------------------------------------------
+
+    async def create_navigation_run(self, run: NavigationRun) -> NavigationRun:
+        """Store one navigation run.
+
+        Args:
+            run: The populated record.
+
+        Returns:
+            NavigationRun: The stored record.
+        """
+        async with self.session_factory() as session:
+            session.add(run)
+            await session.commit()
+            await session.refresh(run)
+            return run
+
+    async def get_navigation_run(self, navigation_id: uuid.UUID) -> Optional[NavigationRun]:
+        """One navigation run by id.
+
+        Args:
+            navigation_id: The run.
+
+        Returns:
+            Optional[NavigationRun]: The run, or None.
+        """
+        async with self.session_factory() as session:
+            return await session.get(NavigationRun, navigation_id)
+
+    async def update_navigation_run(self, navigation_id: uuid.UUID, **values: Any) -> bool:
+        """Write fields onto a navigation run.
+
+        The pipeline writes its progress and its result this way while it runs
+        in the background. The run can be erased in the meantime — an operator
+        deleting the analysis does not wait for the pipeline — and then there is
+        nothing to update, which the caller learns from the return value rather
+        than by recreating the row.
+
+        Args:
+            navigation_id: The run.
+            **values: Column values.
+
+        Returns:
+            bool: Whether the run still existed.
+        """
+        async with self.session_factory() as session:
+            result = await session.execute(
+                update(NavigationRun).where(NavigationRun.id == navigation_id).values(**values)
+            )
+            await session.commit()
+            return bool(result.rowcount)
+
+    async def fail_interrupted_navigations(self) -> int:
+        """Mark navigations left ``running`` by a previous process as failed.
+
+        A navigation runs in the process that started it. If that process
+        stopped — a deploy, a crash — the row would otherwise say ``running``
+        forever and the console would poll it forever.
+
+        Returns:
+            int: Runs marked failed.
+        """
+        async with self.session_factory() as session:
+            result = await session.execute(
+                update(NavigationRun)
+                .where(NavigationRun.status == AnalysisStatus.RUNNING)
+                .values(
+                    status=AnalysisStatus.FAILED,
+                    current_agent=None,
+                    error="navigation interrupted: the service restarted while it was running",
+                )
+            )
+            await session.commit()
+            return int(result.rowcount or 0)
+
+    async def get_latest_navigation(self, analysis_id: uuid.UUID) -> Optional[NavigationRun]:
+        """The most recent navigation built on an analysis.
+
+        Args:
+            analysis_id: The analysis.
+
+        Returns:
+            Optional[NavigationRun]: The newest run, or None.
+        """
+        async with self.session_factory() as session:
+            result = await session.execute(
+                select(NavigationRun)
+                .where(NavigationRun.analysis_id == analysis_id)
+                .order_by(NavigationRun.created_at.desc())
+                .limit(1)
+            )
+            return result.scalar_one_or_none()
+
+    async def get_navigation_feedback(self, navigation_id: uuid.UUID) -> Optional[NavigationFeedback]:
+        """The reviewer's verdict on a navigation.
+
+        Args:
+            navigation_id: The navigation.
+
+        Returns:
+            Optional[NavigationFeedback]: The verdict, or None.
+        """
+        async with self.session_factory() as session:
+            result = await session.execute(
+                select(NavigationFeedback)
+                .where(NavigationFeedback.navigation_id == navigation_id)
+                .order_by(NavigationFeedback.created_at.desc())
+                .limit(1)
+            )
+            return result.scalar_one_or_none()
+
+    async def save_navigation_feedback(
+        self,
+        navigation_id: uuid.UUID,
+        admin_id: uuid.UUID,
+        verdict: FeedbackVerdict,
+        section_feedback: dict[str, Any],
+        notes: str,
+    ) -> tuple[NavigationFeedback, bool]:
+        """Record a verdict on a navigation, or revise the one on record.
+
+        One verdict per navigation, as for an analysis: a second row would count
+        the navigation twice wherever reviews are counted.
+
+        Args:
+            navigation_id: The navigation being judged.
+            admin_id: Who is judging it — recorded as the current reviewer.
+            verdict: The overall call.
+            section_feedback: Per-section flags and comments.
+            notes: Free text.
+
+        Returns:
+            tuple: The stored verdict, and whether an earlier one was revised.
+        """
+        existing = await self.get_navigation_feedback(navigation_id)
+        async with self.session_factory() as session:
+            if existing is None:
+                feedback = NavigationFeedback(
+                    navigation_id=navigation_id,
+                    admin_id=admin_id,
+                    verdict=verdict,
+                    section_feedback=section_feedback,
+                    notes=notes,
+                )
+                session.add(feedback)
+                await session.commit()
+                await session.refresh(feedback)
+                return feedback, False
+
+            await session.execute(
+                update(NavigationFeedback)
+                .where(NavigationFeedback.id == existing.id)
+                .values(
+                    admin_id=admin_id,
+                    verdict=verdict,
+                    section_feedback=section_feedback,
+                    notes=notes,
+                    created_at=utcnow(),
+                )
+            )
+            await session.commit()
+            refreshed = await session.get(NavigationFeedback, existing.id)
+            return (refreshed or existing), True
 
     # ------------------------------------------------------------------
     # Dashboard aggregates

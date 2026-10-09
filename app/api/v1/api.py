@@ -1,7 +1,8 @@
 """API v1 router configuration.
 
-Three routers, matching the three things this service does: authenticate an
-operator, analyse a policy, and report on what has been analysed.
+Four routers, matching what this service does: authenticate an operator,
+analyse a policy, navigate a patient's case on that analysis, and report on
+what has been analysed.
 """
 
 from fastapi import APIRouter
@@ -9,12 +10,14 @@ from fastapi import APIRouter
 from app.api.v1.auth import router as auth_router
 from app.api.v1.dashboard import router as dashboard_router
 from app.api.v1.insurance import router as insurance_router
+from app.api.v1.navigation import router as navigation_router
 from app.core.logging import logger
 
 api_router = APIRouter()
 
 api_router.include_router(auth_router, prefix="/auth", tags=["Auth"])
 api_router.include_router(insurance_router, prefix="/insurance", tags=["Insurance"])
+api_router.include_router(navigation_router, prefix="/insurance", tags=["Navigation"])
 api_router.include_router(dashboard_router, prefix="/dashboard", tags=["Dashboard"])
 
 

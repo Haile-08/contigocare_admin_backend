@@ -57,7 +57,7 @@ eval:
 	@$(call run_with_env,python -m evals.main run)
 
 eval-compare:
-	@$(call run_with_env,python -m evals.main compare --variant v1 --variant v2)
+	@$(call run_with_env,python -m evals.main compare --variant v2 --variant v3)
 
 golden-set:
 	@$(call run_with_env,python -m evals.build_golden_set)

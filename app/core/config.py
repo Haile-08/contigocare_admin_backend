@@ -201,7 +201,7 @@ class Settings:
         self.ENVIRONMENT = get_environment()
 
         # Application Settings
-        self.PROJECT_NAME = os.getenv("PROJECT_NAME", "ContigoCare Admin")
+        self.PROJECT_NAME = os.getenv("PROJECT_NAME", "karai.health Admin")
         self.VERSION = os.getenv("VERSION", "2.0.0")
         self.DESCRIPTION = os.getenv(
             "DESCRIPTION",
@@ -230,18 +230,24 @@ class Settings:
         # notice names. Switching is a one-line env change — the prompt and
         # schema are model-agnostic — but a switch moves the accuracy and
         # invention rates, so run the eval loop before changing these.
-        self.GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash")
-        self.GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash-lite")
+        #
+        # The analysis reads six values and a summary: extraction, which the
+        # newest Flash does as well as Pro at a fraction of the latency. The
+        # fallback is the previous GA Flash rather than Flash-Lite, so a busy
+        # primary degrades to a model of the same class, not a weaker one — and
+        # it is a different model, so an overload on one rarely hits both.
+        self.GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+        self.GEMINI_FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.7-flash")
         # Extraction, not prose: near-zero temperature keeps the same policy
         # producing the same structured answer run over run.
         self.GEMINI_TEMPERATURE = float(os.getenv("GEMINI_TEMPERATURE", "0.0"))
-        # A full `AnalisisGMM` is a large object — around 48 evidence-carrying
-        # fields plus benefits, exclusions and bilingual findings — and on a
-        # thinking model the reasoning is billed against this same ceiling.
-        # Measured output for one extraction runs to roughly 4k tokens on
-        # flash-lite and 10k on flash, so 8192 truncated the better model
-        # mid-JSON and the truncation surfaced as a parse failure rather than as
-        # anything naming the limit.
+        # On a thinking model the reasoning is billed against this same ceiling.
+        # Under the v2 schema — around 48 evidence-carrying fields plus benefits,
+        # exclusions and bilingual findings — measured output ran to roughly 4k
+        # tokens on flash-lite and 10k on flash, so 8192 truncated the better
+        # model mid-JSON and the truncation surfaced as a parse failure rather
+        # than as anything naming the limit. v3 is far smaller; the ceiling is
+        # kept because the reasoning, not the answer, is what varies.
         self.GEMINI_MAX_OUTPUT_TOKENS = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "32768"))
         # Three nested budgets, and the order matters — an operator waiting on a
         # spinner is the thing being protected, not the model.
@@ -261,17 +267,52 @@ class Settings:
         self.GEMINI_CALL_BUDGET_SECONDS = int(os.getenv("GEMINI_CALL_BUDGET_SECONDS", "90"))
         # The agent re-reads its own draft and repairs low-confidence fields.
         self.ANALYSIS_SELF_CRITIQUE_ENABLED = parse_bool_from_env("ANALYSIS_SELF_CRITIQUE_ENABLED", True)
-        # v1 organises the extraction into the seven categories a broker reads a
-        # policy in: the CNSF registration of the condiciones generales, the
-        # internal sublimits, age limits, tenure portability, and the renewal,
-        # agravación and cancellation clauses. It is the only version on disk —
-        # a second one arrives as v2 when the eval harness says it beats this.
-        self.ANALYSIS_PROMPT_VERSION = os.getenv("ANALYSIS_PROMPT_VERSION", "v1")
+        # v3 extracts only the six values the navigation intake is prefilled
+        # from — insurer, start of vigencia, deducible, coaseguro, tope de
+        # coaseguro and antigüedad — plus the summary. v2's eight-category
+        # extraction was retired with that schema change; it is not on disk.
+        self.ANALYSIS_PROMPT_VERSION = os.getenv("ANALYSIS_PROMPT_VERSION", "v3")
         # The ceiling on one `POST /analyze`: extraction plus a repair pass, so
         # roughly two call budgets. This is the number the client's own timeout
         # has to sit above — whichever of the two is smaller decides what the
         # operator sees, and a server that explains itself beats a dead socket.
         self.ANALYSIS_TIMEOUT_SECONDS = int(os.getenv("ANALYSIS_TIMEOUT_SECONDS", "195"))
+
+        # ------------------------------------------------------------------
+        # Navigation — InnovaDerm Navigator, run on a stored analysis
+        # ------------------------------------------------------------------
+        self.NAVIGATION_ENABLED = parse_bool_from_env("NAVIGATION_ENABLED", True)
+        # A label stamped on every navigation run. The prompts are the
+        # handover's, written inline in `app/core/navigator/*_agent.py` exactly as
+        # the handover wrote them, so this names that set rather than a file.
+        self.NAVIGATION_PROMPT_VERSION = os.getenv("NAVIGATION_PROMPT_VERSION", "innovaderm-v2")
+        # One model per agent, following the handover's split: where it ran
+        # Sonnet (the parser's extraction, the adherence monitor's calendar
+        # recommendations) this runs Flash, and where it ran Opus (the plan, the
+        # notice letter, the optimizer's strategy and savings estimates, the
+        # appeal) this runs Pro — the reasoning and the legal and clinical
+        # language are what reach the insurer and the coordinator.
+        self.AGENT_MODEL_PARSER = os.getenv("AGENT_MODEL_PARSER", "gemini-3.8-flash")
+        self.AGENT_MODEL_PLANNER = os.getenv("AGENT_MODEL_PLANNER", "gemini-3.1-pro-preview")
+        self.AGENT_MODEL_OPTIMIZER = os.getenv("AGENT_MODEL_OPTIMIZER", "gemini-3.1-pro-preview")
+        self.AGENT_MODEL_ADHERENCE = os.getenv("AGENT_MODEL_ADHERENCE", "gemini-3.8-flash")
+        self.AGENT_MODEL_NOTIFICATION = os.getenv("AGENT_MODEL_NOTIFICATION", "gemini-3.1-pro-preview")
+        self.AGENT_MODEL_ADVOCATE = os.getenv("AGENT_MODEL_ADVOCATE", "gemini-3.1-pro-preview")
+        # The analysis budgets above are sized for an operator watching a
+        # spinner and for Flash. Navigation runs in the background and four of
+        # its agents think on Pro, which can take well past 45 seconds to write
+        # a plan or an appeal; under the analysis budget every such call would
+        # time out and quietly answer from the fallback Flash instead. The
+        # budget is split between primary and fallback, so the primary gets
+        # about half of it.
+        self.NAVIGATION_CALL_TIMEOUT_SECONDS = int(os.getenv("NAVIGATION_CALL_TIMEOUT_SECONDS", "150"))
+        self.NAVIGATION_CALL_BUDGET_SECONDS = int(os.getenv("NAVIGATION_CALL_BUDGET_SECONDS", "300"))
+        # The agents run one after another, as in the handover, so a navigation
+        # takes minutes. It runs in the background and the console polls it, so
+        # this bounds the whole pipeline rather than an HTTP request. Six calls
+        # at the full call budget, so a slow run degrades an agent rather than
+        # failing the navigation.
+        self.NAVIGATION_TIMEOUT_SECONDS = int(os.getenv("NAVIGATION_TIMEOUT_SECONDS", "1800"))
 
         # ------------------------------------------------------------------
         # Document intake — nothing here is ever written to disk
@@ -317,7 +358,7 @@ class Settings:
         # ------------------------------------------------------------------
         # TOTP (Google Authenticator)
         # ------------------------------------------------------------------
-        self.TOTP_ISSUER = os.getenv("TOTP_ISSUER", "ContigoCare Admin")
+        self.TOTP_ISSUER = os.getenv("TOTP_ISSUER", "karai.health Admin")
         self.TOTP_DIGITS = int(os.getenv("TOTP_DIGITS", "6"))
         self.TOTP_PERIOD_SECONDS = int(os.getenv("TOTP_PERIOD_SECONDS", "30"))
         # One step either side absorbs clock drift. Larger windows widen the
@@ -353,8 +394,8 @@ class Settings:
         self.SMTP_USE_TLS = parse_bool_from_env("SMTP_USE_TLS", False)
         self.SMTP_USE_STARTTLS = parse_bool_from_env("SMTP_USE_STARTTLS", True)
         self.SMTP_TIMEOUT_SECONDS = int(os.getenv("SMTP_TIMEOUT_SECONDS", "15"))
-        self.EMAIL_FROM = os.getenv("EMAIL_FROM", "no-reply@contigo.care")
-        self.EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "ContigoCare")
+        self.EMAIL_FROM = os.getenv("EMAIL_FROM", "no-reply@karai.health")
+        self.EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "karai.health")
         # With no SMTP host configured, mail is written to the log instead of
         # sent. That is what makes the flow testable on a laptop; it is refused
         # in production below, because a reset link nobody receives is a
@@ -406,6 +447,8 @@ class Settings:
             "password_reset": ["10 per minute", "30 per hour"],
             "extract": ["20 per minute"],
             "analyze": ["20 per minute"],
+            # Starts six model calls in the background, so tighter than a single analysis.
+            "navigate": ["10 per minute"],
             # Reading the policy list and reopening a stored analysis. Generous
             # because it is a browsing surface, not a model call.
             "analyses": ["120 per minute"],
@@ -427,7 +470,7 @@ class Settings:
 
         # Evaluation Configuration — the offline harness that scores the agent
         # against the golden set (see docs/agent-improvement.md).
-        self.EVALUATION_MODEL = os.getenv("EVALUATION_MODEL", "gemini-3.5-flash")
+        self.EVALUATION_MODEL = os.getenv("EVALUATION_MODEL", self.GEMINI_MODEL)
         self.EVALUATION_SLEEP_TIME = int(os.getenv("EVALUATION_SLEEP_TIME", "5"))
 
         # Apply environment-specific settings

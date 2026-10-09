@@ -203,12 +203,12 @@ There is still no registration endpoint — a reset acts on a row that already
 exists and cannot bring one into being. The rest of the lifecycle is a CLI:
 
 ```bash
-uv run python scripts/create_admin.py create --email x@contigo.care --name "Ana Ruiz"
+uv run python scripts/create_admin.py create --email x@karai.health --name "Ana Ruiz"
 uv run python scripts/create_admin.py list
-uv run python scripts/create_admin.py disable --email x@contigo.care
-uv run python scripts/create_admin.py enable  --email x@contigo.care
-uv run python scripts/create_admin.py reset-mfa --email x@contigo.care
-uv run python scripts/create_admin.py reset-password --email x@contigo.care
+uv run python scripts/create_admin.py disable --email x@karai.health
+uv run python scripts/create_admin.py enable  --email x@karai.health
+uv run python scripts/create_admin.py reset-mfa --email x@karai.health
+uv run python scripts/create_admin.py reset-password --email x@karai.health
 ```
 
 The password is prompted, never passed as an argument — argv is world-readable

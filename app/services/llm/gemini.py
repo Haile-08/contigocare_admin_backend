@@ -14,7 +14,9 @@ in a route handler.
 The schema is stated *in the prompt* rather than handed to the provider's
 ``responseSchema`` field, which is the one place this file departs from the
 obvious implementation. Gemini caps that field somewhere near 200 properties;
-``AnalisisGMM`` is around 274, counting each ``Campo`` as the five it costs.
+the v2 ``AnalisisGMM`` was around 274, counting each ``Campo`` as the five it
+costs. v3 is well under the cap, but the navigator's agents share this client
+and the cap is a cliff nobody sees coming, so the contract stays in the prompt.
 Over the cap the request is refused with a 400 that names no field, no limit
 and no schema — it reads exactly like a provider outage, and it fails on every
 document rather than on unusual ones. Asking for the schema in the prompt has
@@ -40,11 +42,16 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import (
     Any,
+    Callable,
     Optional,
     Type,
 )
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import (
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+)
 from pydantic import (
     BaseModel,
     ValidationError,
@@ -196,6 +203,23 @@ def _strip_fences(text: str) -> str:
     return body.strip()
 
 
+def _messages(system: Optional[str], prompt: str) -> list[BaseMessage]:
+    """A system prompt, when there is one, then the user prompt.
+
+    Args:
+        system: The system prompt.
+        prompt: The user prompt.
+
+    Returns:
+        list[BaseMessage]: The messages to send.
+    """
+    messages: list[BaseMessage] = []
+    if system:
+        messages.append(SystemMessage(content=system))
+    messages.append(HumanMessage(content=prompt))
+    return messages
+
+
 class GeminiService:
     """Calls Gemini with retries, a model fallback, and schema validation."""
 
@@ -207,13 +231,17 @@ class GeminiService:
         of preventing the whole service from starting — the login and dashboard
         paths do not need Gemini.
         """
-        self._models: dict[str, Any] = {}
+        self._models: dict[tuple[str, bool, float], Any] = {}
 
-    def _get_model(self, model_name: str) -> Any:
+    def _get_model(self, model_name: str, json_mode: bool = True, timeout_seconds: Optional[float] = None) -> Any:
         """Build or return a cached chat model.
 
         Args:
             model_name: The Gemini model id.
+            json_mode: Constrain the decoder to JSON. Off only for the one call
+                that answers in prose, the navigation notice letter.
+            timeout_seconds: The SDK's own per-request timeout. Defaults to
+                ``GEMINI_TIMEOUT_SECONDS``.
 
         Returns:
             Any: A configured ``ChatGoogleGenerativeAI``.
@@ -221,32 +249,38 @@ class GeminiService:
         Raises:
             ModelCallError: If no API key is configured.
         """
-        if model_name in self._models:
-            return self._models[model_name]
+        timeout = timeout_seconds or settings.GEMINI_TIMEOUT_SECONDS
+        key = (model_name, json_mode, timeout)
+        if key in self._models:
+            return self._models[key]
 
         if not settings.GEMINI_API_KEY:
             raise ModelCallError("GEMINI_API_KEY is not configured")
 
         from langchain_google_genai import ChatGoogleGenerativeAI
 
+        options: dict[str, Any] = {}
+        if json_mode:
+            # Constrains the decoder to emit syntactically valid JSON. This is
+            # not the schema field — it carries no property limit — and it
+            # removes the "```json" preamble from the failure modes without
+            # constraining which keys may appear.
+            options["response_mime_type"] = "application/json"
+
         model = ChatGoogleGenerativeAI(
             model=model_name,
             google_api_key=settings.GEMINI_API_KEY,
             temperature=settings.GEMINI_TEMPERATURE,
             max_output_tokens=settings.GEMINI_MAX_OUTPUT_TOKENS,
-            timeout=settings.GEMINI_TIMEOUT_SECONDS,
+            timeout=timeout,
             # Retries are handled here, with logging and a fallback chain, so
             # the SDK's own silent retry is turned off.
             max_retries=0,
             safety_settings=_PERMISSIVE_SAFETY,
-            # Constrains the decoder to emit syntactically valid JSON. This is
-            # not the schema field — it carries no property limit — and it
-            # removes the "```json" preamble from the failure modes without
-            # constraining which keys may appear.
-            response_mime_type="application/json",
+            **options,
         )
 
-        self._models[model_name] = model
+        self._models[key] = model
         return model
 
     async def structured_call(
@@ -255,6 +289,7 @@ class GeminiService:
         schema: Type[BaseModel],
         *,
         purpose: str,
+        model: Optional[str] = None,
     ) -> ModelResult:
         """Call Gemini and parse the answer into a schema.
 
@@ -273,6 +308,8 @@ class GeminiService:
             prompt: The complete prompt, already redacted.
             schema: The Pydantic model to validate into.
             purpose: A label for logs and traces, e.g. ``extraction``.
+            model: The primary model for this call. Defaults to
+                ``GEMINI_MODEL``.
 
         Returns:
             ModelResult: The parsed answer and its accounting.
@@ -281,11 +318,154 @@ class GeminiService:
             ModelBlockedError: If safety filters refused the content.
             ModelCallError: If every model failed, or the budget ran out.
         """
-        chain = [settings.GEMINI_MODEL]
-        if settings.GEMINI_FALLBACK_MODEL and settings.GEMINI_FALLBACK_MODEL != settings.GEMINI_MODEL:
+        messages: list[BaseMessage] = [HumanMessage(content=prompt + _schema_block(schema))]
+
+        def parse(text: str) -> Any:
+            try:
+                return schema.model_validate_json(text)
+            except ValidationError as exc:
+                # The count and the shape of the failure, never the content: a
+                # validation message quotes the input that failed, and the input
+                # here is policy text. `json_invalid` means the response was
+                # truncated or interrupted without `finish_reason` saying so;
+                # anything else means the JSON was well-formed but off-contract.
+                malformed = any(error.get("type") == "json_invalid" for error in exc.errors())
+                detail = "response was not valid JSON" if malformed else f"{exc.error_count()} field(s) invalid"
+                raise ValueError(f"model output did not match {schema.__name__}: {detail}") from exc
+
+        return await self._run_chain(messages, parse, purpose=purpose, model=model, json_mode=True)
+
+    async def json_call(
+        self,
+        prompt: str,
+        *,
+        system: Optional[str] = None,
+        purpose: str,
+        model: Optional[str] = None,
+        timeout_seconds: Optional[float] = None,
+        budget_seconds: Optional[float] = None,
+    ) -> ModelResult:
+        """Call Gemini for a JSON object whose shape the prompt describes.
+
+        This is how the InnovaDerm agents ask: a system prompt, a user prompt
+        that spells out the keys it wants, and nothing appended. Their answers
+        are free-form by design — an appeal pathway comes back as ``step_1`` on
+        one run and ``level_1`` on the next — so the result is a plain dict and
+        each agent reads it defensively, as the originals did.
+
+        Args:
+            prompt: The user prompt.
+            system: The system prompt, when the agent has one.
+            purpose: Log label.
+            model: The primary model. Defaults to ``GEMINI_MODEL``.
+            timeout_seconds: Per-attempt cap. Defaults to ``GEMINI_TIMEOUT_SECONDS``.
+            budget_seconds: The whole call's cap. Defaults to
+                ``GEMINI_CALL_BUDGET_SECONDS``.
+
+        Returns:
+            ModelResult: ``parsed`` is the decoded object.
+
+        Raises:
+            ModelBlockedError: If safety filters refused the content.
+            ModelCallError: If every model failed, or the budget ran out.
+        """
+
+        def parse(text: str) -> dict[str, Any]:
+            try:
+                decoded = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ValueError("model output was not valid JSON") from exc
+            if not isinstance(decoded, dict):
+                raise ValueError(f"model output was a JSON {type(decoded).__name__}, not an object")
+            return decoded
+
+        return await self._run_chain(
+            _messages(system, prompt),
+            parse,
+            purpose=purpose,
+            model=model,
+            json_mode=True,
+            timeout_seconds=timeout_seconds,
+            budget_seconds=budget_seconds,
+        )
+
+    async def text_call(
+        self,
+        prompt: str,
+        *,
+        system: Optional[str] = None,
+        purpose: str,
+        model: Optional[str] = None,
+        timeout_seconds: Optional[float] = None,
+        budget_seconds: Optional[float] = None,
+    ) -> ModelResult:
+        """Call Gemini for prose.
+
+        Args:
+            prompt: The user prompt.
+            system: The system prompt, when there is one.
+            purpose: Log label.
+            model: The primary model. Defaults to ``GEMINI_MODEL``.
+            timeout_seconds: Per-attempt cap. Defaults to ``GEMINI_TIMEOUT_SECONDS``.
+            budget_seconds: The whole call's cap. Defaults to
+                ``GEMINI_CALL_BUDGET_SECONDS``.
+
+        Returns:
+            ModelResult: ``parsed`` is the stripped text.
+
+        Raises:
+            ModelBlockedError: If safety filters refused the content.
+            ModelCallError: If every model failed, or the budget ran out.
+        """
+        return await self._run_chain(
+            _messages(system, prompt),
+            lambda text: text,
+            purpose=purpose,
+            model=model,
+            json_mode=False,
+            timeout_seconds=timeout_seconds,
+            budget_seconds=budget_seconds,
+        )
+
+    async def _run_chain(
+        self,
+        messages: list[BaseMessage],
+        parse: Callable[[str], Any],
+        *,
+        purpose: str,
+        model: Optional[str],
+        json_mode: bool,
+        timeout_seconds: Optional[float] = None,
+        budget_seconds: Optional[float] = None,
+    ) -> ModelResult:
+        """Try the primary model, then the fallback, under one budget.
+
+        Args:
+            messages: What to send.
+            parse: Turns the response text into the result; raises ValueError
+                to have the attempt retried.
+            purpose: Log label.
+            model: The primary model, or None for ``GEMINI_MODEL``.
+            json_mode: Whether the decoder is constrained to JSON.
+            timeout_seconds: Per-attempt cap, or None for ``GEMINI_TIMEOUT_SECONDS``.
+            budget_seconds: The whole chain's cap, or None for
+                ``GEMINI_CALL_BUDGET_SECONDS``.
+
+        Returns:
+            ModelResult: The parsed answer and its accounting.
+
+        Raises:
+            ModelBlockedError: If safety filters refused the content.
+            ModelCallError: If every model failed, or the budget ran out.
+        """
+        primary = model or settings.GEMINI_MODEL
+        chain = [primary]
+        if settings.GEMINI_FALLBACK_MODEL and settings.GEMINI_FALLBACK_MODEL != primary:
             chain.append(settings.GEMINI_FALLBACK_MODEL)
 
-        deadline = time.monotonic() + settings.GEMINI_CALL_BUDGET_SECONDS
+        timeout = float(timeout_seconds or settings.GEMINI_TIMEOUT_SECONDS)
+        budget = float(budget_seconds or settings.GEMINI_CALL_BUDGET_SECONDS)
+        deadline = time.monotonic() + budget
         last_error: Optional[Exception] = None
 
         for index, model_name in enumerate(chain):
@@ -295,7 +475,7 @@ class GeminiService:
                     "gemini_budget_exhausted",
                     purpose=purpose,
                     skipped_model=model_name,
-                    budget_seconds=settings.GEMINI_CALL_BUDGET_SECONDS,
+                    budget_seconds=budget,
                 )
                 break
 
@@ -308,7 +488,7 @@ class GeminiService:
             share = remaining / (len(chain) - index)
 
             try:
-                return await self._call_one(prompt, schema, model_name, purpose, share)
+                return await self._call_one(messages, parse, model_name, purpose, share, json_mode, timeout)
             except ModelBlockedError:
                 # A refusal is a property of the content, not the model. Trying
                 # a second model with the same text wastes a call and a few
@@ -328,20 +508,24 @@ class GeminiService:
 
     async def _call_one(
         self,
-        prompt: str,
-        schema: Type[BaseModel],
+        messages: list[BaseMessage],
+        parse: Callable[[str], Any],
         model_name: str,
         purpose: str,
         budget_seconds: float,
+        json_mode: bool,
+        timeout_seconds: float,
     ) -> ModelResult:
         """Call one model, retrying transient failures within a budget.
 
         Args:
-            prompt: The prompt to send.
-            schema: Response schema.
+            messages: What to send.
+            parse: Response text to result.
             model_name: Which model.
             purpose: Log label.
             budget_seconds: Wall-clock left for this model, retries included.
+            json_mode: Whether the decoder is constrained to JSON.
+            timeout_seconds: The cap on any one attempt.
 
         Returns:
             ModelResult: The parsed answer.
@@ -350,8 +534,7 @@ class GeminiService:
             ModelBlockedError: On a safety refusal.
             ModelCallError: If the retries or the budget are exhausted.
         """
-        model = self._get_model(model_name)
-        message = HumanMessage(content=prompt + _schema_block(schema))
+        chat_model = self._get_model(model_name, json_mode, timeout_seconds)
 
         started = time.perf_counter()
         deadline = time.monotonic() + budget_seconds
@@ -379,10 +562,10 @@ class GeminiService:
                         raise ModelCallError(f"{model_name} ran out of budget")
 
                     response = await asyncio.wait_for(
-                        model.ainvoke([message]),
-                        timeout=min(float(settings.GEMINI_TIMEOUT_SECONDS), remaining),
+                        chat_model.ainvoke(messages),
+                        timeout=min(timeout_seconds, remaining),
                     )
-                    return self._interpret(response, schema, model_name, started, purpose)
+                    return self._interpret(response, parse, model_name, started, purpose, json_mode)
         except RetryError as exc:
             raise ModelCallError(f"{model_name} failed after retries") from exc
 
@@ -391,19 +574,21 @@ class GeminiService:
     def _interpret(
         self,
         response: Any,
-        schema: Type[BaseModel],
+        parse: Callable[[str], Any],
         model_name: str,
         started: float,
         purpose: str,
+        json_mode: bool,
     ) -> ModelResult:
         """Validate a response message into a ``ModelResult``.
 
         Args:
             response: The response message.
-            schema: The expected schema.
+            parse: Response text to result; raises ValueError when it cannot.
             model_name: Which model answered.
             started: ``perf_counter`` value from before the call.
             purpose: Log label.
+            json_mode: Whether a markdown fence should be stripped first.
 
         Returns:
             ModelResult: The parsed answer and accounting.
@@ -429,22 +614,13 @@ class GeminiService:
             # "invalid response", because the fix is a config change.
             raise ValueError("response truncated at max_output_tokens; raise GEMINI_MAX_OUTPUT_TOKENS")
 
-        text = _strip_fences(_message_text(response))
+        text = _message_text(response).strip()
+        if json_mode:
+            text = _strip_fences(text)
         if not text:
             raise ValueError(f"model returned an empty response (finish_reason={finish_reason or 'unknown'})")
 
-        try:
-            parsed = schema.model_validate_json(text)
-        except ValidationError as exc:
-            # The count and the shape of the failure, never the content: a
-            # validation message quotes the input that failed, and the input
-            # here is policy text. `json_invalid` means the response was
-            # truncated or interrupted without `finish_reason` saying so;
-            # anything else means the JSON was well-formed but off-contract.
-            malformed = any(error.get("type") == "json_invalid" for error in exc.errors())
-            detail = "response was not valid JSON" if malformed else f"{exc.error_count()} field(s) invalid"
-            raise ValueError(f"model output did not match {schema.__name__}: {detail}") from exc
-
+        parsed = parse(text)
         input_tokens, output_tokens = self._read_usage(response)
 
         logger.info(

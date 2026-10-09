@@ -75,7 +75,7 @@ fi
 exec systemd-run \
     --quiet --collect "$io_mode" \
     --unit="contigocare-run-$$" \
-    --description="ContigoCare one-off: $*" \
+    --description="karai.health one-off: $*" \
     --working-directory="$APP_DIR" \
     --property=User=ccadmin \
     --property=Group=ccadmin \

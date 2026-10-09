@@ -13,6 +13,10 @@ from app.models.analysis import (
     FeedbackVerdict,
 )
 from app.models.base import BaseModel, utcnow
+from app.models.navigation import (
+    NavigationFeedback,
+    NavigationRun,
+)
 from app.models.password_reset_token import (
     PasswordResetToken,
     hash_reset_token,
@@ -30,6 +34,8 @@ __all__ = [
     "AnalysisStatus",
     "BaseModel",
     "FeedbackVerdict",
+    "NavigationFeedback",
+    "NavigationRun",
     "PasswordResetToken",
     "RecoveryCode",
     "RefreshToken",

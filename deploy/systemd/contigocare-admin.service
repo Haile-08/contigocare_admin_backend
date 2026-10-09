@@ -1,4 +1,4 @@
-# ContigoCare Admin API — production service.
+# karai.health Admin API — production service.
 # Install as /etc/systemd/system/contigocare-admin.service
 #
 # Assumes the repo IS /opt/contigocare-admin, owned by the dedicated `ccadmin`
@@ -13,7 +13,7 @@
 # not required at runtime.
 
 [Unit]
-Description=ContigoCare Admin API (production)
+Description=karai.health Admin API (production)
 After=network-online.target postgresql.service
 Wants=network-online.target
 

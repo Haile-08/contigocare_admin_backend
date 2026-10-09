@@ -134,9 +134,9 @@ uv run python evals/main.py compare \
   --variant v1 --variant v2
 ```
 
-Ship `v2` by setting `ANALYSIS_PROMPT_VERSION=v2`. Keep `extraction_v1.md` in
-the repository: old runs recorded `prompt_version`, and deleting the file makes
-those runs unexplainable.
+Ship `v4` by setting `ANALYSIS_PROMPT_VERSION=v4`. Keep `extraction_v3.md` in
+the repository while it is still runnable: old runs recorded `prompt_version`,
+and deleting the file makes those runs unexplainable.
 
 The one exception is a version the schema has outgrown. The output contract is
 generated from `AnalisisGMM` and appended at call time, so a prompt naming

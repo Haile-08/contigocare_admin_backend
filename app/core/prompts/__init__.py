@@ -6,9 +6,11 @@ be attributed to the exact wording that produced it. Without the version stamp,
 "the agent got worse" is unattributable — you cannot tell a prompt edit from
 model drift, and the improvement loop stops working.
 
-``v1`` is the current wording and the only version on disk: the seven-category
-extraction a broker reads a policy in. Adding a version means adding
-``extraction_v2.md`` and pointing ``ANALYSIS_PROMPT_VERSION`` at ``v2``. The
+``v3`` is the current wording and the only version on disk: the six values the
+navigation intake is prefilled from, and a summary. v2's eight-category
+extraction was deleted with that schema change, as v1 was before it, for the
+reason below. Adding a version means adding ``extraction_v4.md`` and pointing
+``ANALYSIS_PROMPT_VERSION`` at ``v4``. The
 previous file stays while it is still *runnable*, so old runs remain explicable
 and the eval harness can score both against the same golden set.
 
@@ -26,6 +28,10 @@ Renumbering an existing version is the one edit to avoid. The label is stamped
 onto every stored run, so moving the current wording to a number that already
 meant something else makes two different prompts indistinguishable in the
 table — and the improvement loop reads that column to attribute a regression.
+
+The navigation agents are not here. They are InnovaDerm's, and their prompts are
+written inline in ``app/core/navigator/*_agent.py`` exactly as the handover wrote
+them, so each agent can be diffed against its original file.
 """
 
 import os

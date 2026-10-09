@@ -1,6 +1,6 @@
 # AI Agent Development Guide
 
-Guidelines for AI agents working on the ContigoCare insurance analysis console.
+Guidelines for AI agents working on the karai.health insurance analysis console.
 
 ## What this service is
 
@@ -24,9 +24,9 @@ make check                # lint + typecheck
 make migrate              # Alembic migrations to latest
 
 # Accounts — the only way one is created
-uv run python scripts/create_admin.py create --email x@contigo.care --name "Name"
+uv run python scripts/create_admin.py create --email x@karai.health --name "Name"
 uv run python scripts/create_admin.py list
-uv run python scripts/create_admin.py reset-mfa --email x@contigo.care
+uv run python scripts/create_admin.py reset-mfa --email x@karai.health
 
 # The improvement loop (see docs/agent-improvement.md)
 uv run python evals/build_golden_set.py
@@ -65,12 +65,16 @@ app/
   api/v1/
     auth.py          # Two-step login, enrolment, rotating refresh, password reset
     insurance.py     # extract -> review -> analyze -> feedback; list, reopen, erase
+    navigation.py    # InnovaDerm intake -> background pipeline -> poll, PDF report, broker kit, feedback
     dashboard.py     # Aggregates, computed in the database
   core/
     config.py        # Settings; refuses weak secrets at startup
     langgraph/
       insurance_agent.py   # extract -> verify -> critique
-    prompts/         # Versioned prompt files (extraction_v1.md, …)
+    navigator/       # InnovaDerm Navigator, ported file for file from the handover:
+                     # parser, planner, advocate, optimizer, adherence agents,
+                     # orchestrator, coordinator report (PDF), broker kit (ZIP)
+    prompts/         # Versioned analysis prompts (extraction_v2.md, critique_v2.md)
     metrics.py       # Prometheus, including redaction + hallucination counters
     middleware.py    # Logging context, security headers
   models/            # admin, refresh_token, analysis
@@ -162,21 +166,86 @@ There is **no checkpointer**, deliberately: it would write policy text to
 Postgres. The graph runs once, in memory, per request.
 
 Prompts are versioned files. Adding a version means adding
-`extraction_v2.md` and pointing `ANALYSIS_PROMPT_VERSION` at it. Never edit a
+`extraction_v4.md` and pointing `ANALYSIS_PROMPT_VERSION` at it. Never edit a
 shipped version in place, and never renumber one — stored runs reference it.
 
 Deleting one is different, and is occasionally right. The output contract is
 generated from `AnalisisGMM` and appended at call time, not written in the
 prompt file, so a prompt naming sections the schema no longer has does not fail
 — it returns something plausible and wrong. A schema change that retires a
-version should delete it in the same change. `v1` is the only runnable
-version, and startup refuses any other, so `ANALYSIS_PROMPT_VERSION` and the
-files on disk cannot drift apart unnoticed.
+version should delete it in the same change — which is what happened to `v1`
+when `preautorizacion` was added, and to `v2` when the extraction was cut down
+to what the navigator uses. `v3` is the only runnable version, and startup
+refuses any other, so `ANALYSIS_PROMPT_VERSION` and the files on disk cannot
+drift apart unnoticed.
+
+**The analysis extracts only what the navigator uses**: `aseguradora`,
+`vigencia_inicio`, `deducible`, `coaseguro_porcentaje`, `tope_coaseguro` and
+`antiguedad` — the values the navigation intake is prefilled from — plus
+`resumen_es`/`summary_en`, `confianza_global` and `notas_calidad_documento`.
+The navigator's parser reads everything else from the redacted policy text.
+Don't grow the analysis back into a second policy reading nothing consumes; a
+field belongs here only when the intake (or another consumer) reads it.
+
+## Navigation — InnovaDerm Navigator
+
+`app/core/navigator/` is `innovaderm_v2_handover_2026-06-01`, ported to be **the
+same** as the handover: the same parser, the same five agents, the same prompts
+(inline in each `*_agent.py`, verbatim), run in the same order, producing the same
+`summary` JSON, coordinator report and broker kit. Module names match the
+handover's `agents/` and `scripts/` files so a change can be diffed against the
+original.
+
+    Parser → Planner → Notification letter → Optimizer → Adherence → Advocate (if denial)
+
+- **It runs on a stored analysis's redacted policy text**, never on the upload.
+  The parser reads that text plus the carrier's condiciones generales digest
+  (`navigator/knowledge/`), as the handover's batch script fed it.
+- **It runs in the background.** Six sequential calls take minutes, longer than
+  the proxy allows a request. `POST …/navigation` stores a `running` row and
+  returns 202; the console polls `GET /insurance/navigations/{id}`; a restart
+  marks leftover `running` rows failed. `current_agent` is the progress.
+- **Every agent is Gemini** (`AGENT_MODEL_*`). A failed call falls back to the
+  handover's own fallback for that agent; the run still completes and lists the
+  agent in `degraded_agents`.
+- **Differences from the handover are deliberate and marked `FIX`**: negative
+  payments, loading-dose units, 30-day months, MetLife 0% without programación,
+  the invented authorisation, JAK inhibitors as biologics. Don't reintroduce
+  them to match the handover's saved outputs. Any other divergence from the
+  handover is a bug.
+- **Money and dates follow the handover.** Projections, prices and calendars are
+  computed; the planner's `first_dose_earliest` and the optimizer's savings
+  estimates are the model's, as in the handover, and the report labels them as
+  estimates.
+- **The report is a PDF, not the handover's DOCX** — same sections, labels and
+  figures, rendered with ReportLab (`report.py`'s `ReportBuilder` mirrors the
+  handover's `python-docx` calls so sections still diff against the original).
+  The broker kit's cover sheet is a PDF too. Helvetica covers Windows-1252 only:
+  alert emoji become the alert's colour and other undrawable characters are
+  dropped, so don't add emoji-dependent meaning to the report.
+- **The PDFs and ZIP are built in memory on download** — never written to disk.
+- **A navigation carries its own reviewer feedback** (`navigation_feedback`): a
+  verdict, per-section flags and comments keyed by the summary's section names,
+  and notes. One row per navigation, revised in place like analysis feedback,
+  and erased with the navigation.
+- **The intake has no field for a patient name, policy number or birth date**
+  (`extra="forbid"`). Its free text is redacted server-side and gated like
+  `/analyze`; the dermatologist's name and cédula are professional credentials
+  and are not. Generated letters are scrubbed with the same detector.
+- **Branding** (organisation, privacy URL, ARCO mailbox) lives in
+  `navigator/branding.py`; the handover printed InnovaSalud's.
+- **Erasure includes navigations.** Both deletion scopes remove them first, in
+  the same transaction, and count them in the receipt.
 
 ## Working with Mexican documents
 
 - Identifiers to detect: **CURP, RFC, NSS (IMSS), CLABE, clave de elector (INE),
   lada phone formats, código postal**. Not US SSN/MRN.
+- A name or policy number is proposed **everywhere it appears** (InnovaDerm's
+  rule): a labelled value is searched for across the document, and the names
+  and policy numbers the operator types on upload (`/extract` form fields
+  `names`, `policy_numbers`) are searched for too. Those typed values are used
+  for one scan — never stored, logged or returned.
 - Domain vocabulary stays Spanish in data fields: `suma asegurada`,
   `deducible`, `coaseguro`, `tope de coaseguro`, `antigüedad`,
   `periodo de espera`, `preexistencia`, `tabulador`. Translating these in the
@@ -203,6 +272,9 @@ that raises accuracy *and* invention is a regression.
 - ❌ Accepting pre-redacted text from the client
 - ❌ Adding a checkpointer, cache, or vector store over document content
 - ❌ Logging extracted values or detected entities
+- ❌ Re-engineering the InnovaDerm port away from the handover (other than the marked `FIX`es)
+- ❌ Writing a carrier prior into a field of the quote-checked analysis (`AnalisisGMM`)
+- ❌ Waiting for a navigation inside a request, or writing its report to disk
 - ❌ Redacting money or percentages
 - ❌ Editing a shipped prompt version in place
 - ❌ f-strings in structlog events

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Routine redeploy for admin.contigo.care. Run as root on the server:
+# Routine redeploy for admin.karai.health. Run as root on the server:
 #
 #   sudo /opt/contigocare-admin/deploy/update.sh
 #
@@ -59,5 +59,5 @@ systemctl is-active --quiet contigocare-admin || {
     exit 1
 }
 
-curl -fsS https://admin.contigo.care/api/v1/health && echo
+curl -fsS https://admin.karai.health/api/v1/health && echo
 say "Done"

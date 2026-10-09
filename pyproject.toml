@@ -1,7 +1,7 @@
 [project]
 name = "contigocare-admin-backend"
 version = "2.0.0"
-description = "ContigoCare insurance policy analysis console — admin API"
+description = "karai.health insurance policy analysis console — admin API"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -50,6 +50,10 @@ dependencies = [
     "starlette-prometheus>=0.7.0",
     "tqdm>=4.67.1",
     "colorama>=0.4.6",
+    # Navigation report and broker cover sheet. Pure Python with its own
+    # standard fonts, so the PDF is built in memory with no system font or
+    # renderer to install on the server.
+    "reportlab>=5.0.1",
 ]
 
 [project.optional-dependencies]
@@ -132,6 +136,8 @@ convention = "google"
 # Ignore `E402` (import violations) in all `__init__.py` files
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["E402"]
+# A test's name is its docstring.
+"tests/**" = ["D"]
 
 [tool.pyright]
 include = ["app", "evals"]

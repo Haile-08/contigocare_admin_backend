@@ -22,6 +22,14 @@ the same person as the titular on page 4 — without ever learning who that is.
 the review screen pre-selected; LOW spans arrive listed but unchecked. The admin
 decides. The detector's job is to make sure nothing identifying is *absent* from
 that list, not to be the last word on it.
+
+**A name is removed everywhere it appears, not only where it is labelled.** This
+is the InnovaDerm carátula redactor's rule: it blacked out every occurrence of
+the patient's name and policy number, not just the form field. Two families here
+do the same within this engine's proposals — a value found behind a label is
+searched for across the rest of the document, and names or a policy number the
+operator supplies are searched for everywhere, accent- and case-insensitively.
+Both still arrive on the review screen as proposals like any other span.
 """
 
 import re
@@ -343,6 +351,107 @@ HONORIFIC_RE = re.compile(
     r"(?:\s+(?:[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+|[A-ZÁÉÍÓÚÑ]{2,}))?)",
 )
 
+# Categories whose labelled value is looked for again across the whole document.
+# A name or a policy number printed once beside its label is routinely repeated
+# unlabelled — in a clause, a footer, a signature block.
+PROPAGATED_CATEGORIES = frozenset({Category.NOMBRE, Category.NUM_POLIZA})
+
+# A labelled value propagates only when it has the shape of what the category
+# names. "Póliza: Gastos Médicos Mayores Individual" is a product line behind a
+# policy label, and repeating that redaction across the conditions would blank
+# the contract; a policy *number* has a digit in it, and a name has no digits
+# and a handful of words.
+PROPAGATE_NAME_RE = re.compile(r"^[A-Za-zÁÉÍÓÚÑÜáéíóúñü.'\-]+(?:\s+[A-Za-zÁÉÍÓÚÑÜáéíóúñü.'\-]+){1,5}$")
+PROPAGATE_POLICY_RE = re.compile(r"^(?=.*\d)[A-Za-z0-9][A-Za-z0-9\-/. ]{3,39}$")
+
+# Bounds on operator-supplied terms: each one is compiled into a search, and a
+# one-letter "name" would redact half the document.
+SUPPLIED_TERM_MIN_CHARS = 3
+SUPPLIED_TERM_MAX_CHARS = 120
+SUPPLIED_TERMS_MAX = 10
+
+# Accent-insensitive character classes for building a search from a value.
+_ACCENT_CLASSES = {
+    "a": "[aáàäâ]",
+    "e": "[eéèëê]",
+    "i": "[iíìïî]",
+    "o": "[oóòöô]",
+    "u": "[uúùüû]",
+    "n": "[nñ]",
+    "c": "[cç]",
+}
+
+
+def _fold_char(char: str) -> str:
+    """Strip the accent from one character.
+
+    Args:
+        char: A single character.
+
+    Returns:
+        str: The base character, lowercased.
+    """
+    decomposed = unicodedata.normalize("NFKD", char)
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).lower()
+
+
+def phrase_pattern(value: str) -> Optional[Pattern[str]]:
+    """A search for every occurrence of a value, however it was typed.
+
+    ``Juan Pérez López`` matches ``JUAN PEREZ LOPEZ`` and ``Juan Pérez`` split
+    across a line break:
+    case, accents and whitespace vary across a scanned document, and the value
+    does not. Word boundaries keep ``Ana`` from matching inside ``Mariana``.
+
+    Args:
+        value: The name or number to find.
+
+    Returns:
+        Optional[Pattern]: The compiled search, or None for a value with no
+        searchable characters.
+    """
+    tokens = value.split()
+    if not tokens:
+        return None
+
+    parts: list[str] = []
+    for token in tokens:
+        pieces = []
+        for char in token:
+            base = _fold_char(char)
+            pieces.append(_ACCENT_CLASSES.get(base, re.escape(char)))
+        parts.append("".join(pieces))
+
+    return re.compile(
+        r"(?<![0-9A-Za-zÁÉÍÓÚÑÜáéíóúñü])" + r"\s+".join(parts) + r"(?![0-9A-Za-zÁÉÍÓÚÑÜáéíóúñü])",
+        re.IGNORECASE,
+    )
+
+
+def clean_supplied_terms(raw: Iterable[str]) -> list[str]:
+    """Normalise operator-supplied names or numbers into search terms.
+
+    Args:
+        raw: Terms as typed, possibly comma- or newline-separated.
+
+    Returns:
+        list[str]: Distinct, bounded terms.
+    """
+    terms: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        for piece in re.split(r"[,;\n]", item or ""):
+            term = " ".join(piece.split())
+            if not SUPPLIED_TERM_MIN_CHARS <= len(term) <= SUPPLIED_TERM_MAX_CHARS:
+                continue
+            key = "".join(_fold_char(char) for char in term)
+            if key in seen:
+                continue
+            seen.add(key)
+            terms.append(term)
+    return terms[:SUPPLIED_TERMS_MAX]
+
+
 # A bare date. Only ever LOW: vigencia dates are needed for the analysis, so
 # these are shown to the admin unchecked rather than removed automatically.
 FECHA_RE = re.compile(
@@ -356,11 +465,19 @@ FECHA_RE = re.compile(
 class RedactionEngine:
     """Finds and removes datos personales from extracted document text."""
 
-    def detect(self, text: str) -> list[Span]:
+    def detect(
+        self,
+        text: str,
+        names: Iterable[str] = (),
+        policy_numbers: Iterable[str] = (),
+    ) -> list[Span]:
         """Find every candidate identifier in a document.
 
         Args:
             text: The extracted document text.
+            names: Names the operator knows are in the document — the patient,
+                the titular. Every occurrence is proposed, labelled or not.
+            policy_numbers: Policy or certificate numbers, likewise.
 
         Returns:
             list[Span]: Non-overlapping spans, ordered by position. Where two
@@ -378,6 +495,9 @@ class RedactionEngine:
         candidates.extend(self._detect_labelled(text))
         candidates.extend(self._detect_honorifics(text))
         candidates.extend(self._detect_loose_dates(text))
+        candidates.extend(self._detect_supplied(text, names, Category.NOMBRE))
+        candidates.extend(self._detect_supplied(text, policy_numbers, Category.NUM_POLIZA))
+        candidates.extend(self._detect_repeats(text, candidates))
 
         kept = [span for span in candidates if not self._overlaps_any(span, protected)]
         return self._resolve_overlaps(kept)
@@ -472,6 +592,61 @@ class RedactionEngine:
                 Confidence.MEDIUM,
                 match.group("value"),
             )
+
+    def _detect_supplied(self, text: str, terms: Iterable[str], category: Category) -> Iterable[Span]:
+        """Detect every occurrence of an operator-supplied name or number.
+
+        InnovaDerm's ``--names`` and ``--policy-number``: the operator holds the
+        patient's identity in their own records and knows exactly which strings
+        must not leave. Proposed HIGH, so they arrive pre-selected.
+
+        Args:
+            text: Document text.
+            terms: The supplied values.
+            category: ``NOMBRE`` or ``NUM_POLIZA``.
+
+        Yields:
+            Span: Each occurrence.
+        """
+        for term in clean_supplied_terms(terms):
+            pattern = phrase_pattern(term)
+            if pattern is None:
+                continue
+            for match in pattern.finditer(text):
+                yield Span(match.start(), match.end(), category, Confidence.HIGH, match.group(0))
+
+    def _detect_repeats(self, text: str, found: list[Span]) -> Iterable[Span]:
+        """Detect the unlabelled repeats of a labelled name or policy number.
+
+        Args:
+            text: Document text.
+            found: Spans the other families produced.
+
+        Yields:
+            Span: Each further occurrence, at the confidence of the original.
+        """
+        values: dict[tuple[Category, str], Confidence] = {}
+        rank = {Confidence.HIGH: 3, Confidence.MEDIUM: 2, Confidence.LOW: 1}
+
+        for span in found:
+            if span.category not in PROPAGATED_CATEGORIES or span.confidence == Confidence.LOW:
+                continue
+            value = " ".join(span.text.split()).strip(" .,;:")
+            if self._is_placeholder_value(value):
+                continue
+            shape = PROPAGATE_NAME_RE if span.category == Category.NOMBRE else PROPAGATE_POLICY_RE
+            if not shape.match(value):
+                continue
+            key = (span.category, value)
+            if rank[span.confidence] > rank[values.get(key, Confidence.LOW)]:
+                values[key] = span.confidence
+
+        for (category, value), confidence in values.items():
+            pattern = phrase_pattern(value)
+            if pattern is None:
+                continue
+            for match in pattern.finditer(text):
+                yield Span(match.start(), match.end(), category, confidence, match.group(0))
 
     def _detect_loose_dates(self, text: str) -> Iterable[Span]:
         """Detect unanchored dates as low-confidence suggestions.

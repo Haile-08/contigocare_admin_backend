@@ -36,6 +36,10 @@ class AnalysisStatus(str, Enum):
     # was ever made. Recorded because a spike here means the redactor or the
     # review UI is failing, and that is worth seeing on the dashboard.
     BLOCKED_BY_REDACTION = "blocked_by_redaction"
+    # Navigation runs only: the InnovaDerm pipeline runs in the background and
+    # the console polls the row until it leaves this state. An analysis is
+    # written once, finished, and never carries it.
+    RUNNING = "running"
 
 
 class FeedbackVerdict(str, Enum):

@@ -33,6 +33,7 @@ from fastapi import (
     APIRouter,
     Depends,
     File,
+    Form,
     HTTPException,
     Query,
     Request,
@@ -41,6 +42,7 @@ from fastapi import (
 )
 
 from app.api.v1.auth import get_current_admin
+from app.api.v1.navigation import navigation_to_response
 from app.core.config import settings
 from app.core.langgraph import insurance_agent
 from app.core.limiter import limiter
@@ -117,7 +119,6 @@ def summarize_run(run: AnalysisRun, verdict) -> AnalysisSummary:
     # would read as an extraction failure rather than a rename.
     identificacion = result.get("identificacion") or result.get("datos_poliza") or {}
     aseguradora = (identificacion.get("aseguradora") or {}).get("valor")
-    hallazgos = result.get("hallazgos", []) or []
 
     return AnalysisSummary(
         id=str(run.id),
@@ -128,7 +129,6 @@ def summarize_run(run: AnalysisRun, verdict) -> AnalysisSummary:
         confianza_global=result.get("confianza_global"),
         verdict=verdict.value if verdict is not None and hasattr(verdict, "value") else verdict,
         latency_ms=run.latency_ms,
-        hallazgos_criticos=sum(1 for h in hallazgos if h.get("severidad") == "critica"),
     )
 
 # Read the upload in bounded chunks. `await file.read()` with no argument will
@@ -172,6 +172,8 @@ async def _read_upload(file: UploadFile) -> bytes:
 async def extract_document(
     request: Request,
     file: UploadFile = File(...),
+    names: str = Form(default="", max_length=1000),
+    policy_numbers: str = Form(default="", max_length=300),
     admin: Admin = Depends(get_current_admin),
 ):
     """Parse an uploaded policy and propose redactions.
@@ -180,9 +182,17 @@ async def extract_document(
     memory, OCRed in memory when needed, scanned for identifiers, and the result
     is returned to the caller.
 
+    ``names`` and ``policy_numbers`` are InnovaDerm's ``--names`` and
+    ``--policy-number``: what the operator already knows identifies this
+    patient, so every occurrence is proposed for removal, labelled or not. They
+    are used for this one scan and dropped — never stored, never logged, never
+    echoed back except as the spans they produced.
+
     Args:
         request: For rate limiting.
         file: The uploaded policy.
+        names: Comma- or newline-separated names to find everywhere.
+        policy_numbers: Comma- or newline-separated policy numbers, likewise.
         admin: The signed-in operator.
 
     Returns:
@@ -210,7 +220,7 @@ async def extract_document(
 
     documents_processed_total.labels(kind=document.kind.value).inc()
 
-    spans = await asyncio.to_thread(redaction_engine.detect, document.text)
+    spans = await asyncio.to_thread(redaction_engine.detect, document.text, [names], [policy_numbers])
     seen_before = await db.document_seen_before(document.sha256)
 
     logger.info(
@@ -219,6 +229,7 @@ async def extract_document(
         kind=document.kind.value,
         pages=document.page_count,
         spans=len(spans),
+        supplied_terms=bool(names.strip() or policy_numbers.strip()),
         previously_analyzed=seen_before,
     )
 
@@ -608,6 +619,8 @@ async def get_analysis(
     # that needs it is this one: the erasure control has to name how many runs
     # "everything for this patient" actually is before anyone presses it.
     patient_analysis_count = await db.count_patient_analyses(run.patient_id)
+    navigation = await db.get_latest_navigation(run.id)
+    navigation_feedback = await db.get_navigation_feedback(navigation.id) if navigation is not None else None
 
     return AnalysisDetailResponse(
         analysis_id=str(run.id),
@@ -635,6 +648,7 @@ async def get_analysis(
             else None
         ),
         patient_analysis_count=patient_analysis_count,
+        navigation=navigation_to_response(navigation, navigation_feedback) if navigation is not None else None,
     )
 
 
@@ -650,8 +664,8 @@ async def delete_analysis(
 
     This is the console's answer to "remove this patient's data". There is
     nothing else to remove: the uploaded document was never stored, so what a
-    run holds is the redacted text, the structured result and the reviewer's
-    verdict, and this deletes all three. Nothing is archived, tombstoned or
+    run holds is the redacted text, the structured result, the reviewer's
+    verdict and any navigations built on it, and this deletes all four. Nothing is archived, tombstoned or
     soft-deleted; a soft delete would leave the redacted policy in the table
     while telling the operator it was gone.
 
@@ -690,9 +704,9 @@ async def delete_analysis(
     patient_id = run.patient_id
 
     if scope == "patient":
-        deleted_analyses, deleted_feedback = await db.delete_patient_analyses(patient_id)
+        deleted_analyses, deleted_feedback, deleted_navigations = await db.delete_patient_analyses(patient_id)
     else:
-        deleted_analyses, deleted_feedback = await db.delete_analysis_run(run.id)
+        deleted_analyses, deleted_feedback, deleted_navigations = await db.delete_analysis_run(run.id)
 
     analysis_deletions_total.labels(scope=scope).inc(deleted_analyses)
 
@@ -706,10 +720,12 @@ async def delete_analysis(
         scope=scope,
         deleted_analyses=deleted_analyses,
         deleted_feedback=deleted_feedback,
+        deleted_navigations=deleted_navigations,
     )
 
     return DeletionResponse(
         patient_id=patient_id,
         deleted_analyses=deleted_analyses,
         deleted_feedback=deleted_feedback,
+        deleted_navigations=deleted_navigations,
     )

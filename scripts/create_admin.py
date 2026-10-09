@@ -7,18 +7,18 @@ the set of people who can use this tool is exactly the set of rows someone with
 database access deliberately created.
 
     # Create an account (prompts for the password, never echoes it)
-    uv run python scripts/create_admin.py create --email ops@contigo.care --name "Ana Ruiz"
+    uv run python scripts/create_admin.py create --email ops@karai.health --name "Ana Ruiz"
 
     # Non-interactive, for a provisioning pipeline. Reads the password from an
     # environment variable rather than argv, because argv is world-readable in
     # /proc and lands in shell history.
     ADMIN_PASSWORD='...' uv run python scripts/create_admin.py create \
-        --email ops@contigo.care --name "Ana Ruiz" --password-from-env ADMIN_PASSWORD
+        --email ops@karai.health --name "Ana Ruiz" --password-from-env ADMIN_PASSWORD
 
     uv run python scripts/create_admin.py list
-    uv run python scripts/create_admin.py disable --email ops@contigo.care
-    uv run python scripts/create_admin.py reset-mfa --email ops@contigo.care
-    uv run python scripts/create_admin.py reset-password --email ops@contigo.care
+    uv run python scripts/create_admin.py disable --email ops@karai.health
+    uv run python scripts/create_admin.py reset-mfa --email ops@karai.health
+    uv run python scripts/create_admin.py reset-password --email ops@karai.health
 
 The new account has **no** authenticator attached. The operator enrols their own
 Google Authenticator on first sign-in, so the seed is generated in the running
@@ -274,7 +274,7 @@ def build_parser() -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(
         prog="create_admin.py",
-        description="Gestión de cuentas de administrador para la consola ContigoCare.",
+        description="Gestión de cuentas de administrador para la consola karai.health.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 

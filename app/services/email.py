@@ -155,7 +155,7 @@ async def send_password_reset_email(
     text_body = (
         f"{greeting}\n\n"
         "Recibimos una solicitud para restablecer la contraseña de su cuenta en la "
-        "consola de ContigoCare.\n\n"
+        "consola de karai.health.\n\n"
         f"Abra este enlace para elegir una contraseña nueva:\n{reset_url}\n\n"
         f"El enlace caduca en {expires_in_minutes} minutos y solo puede usarse una vez.\n\n"
         "Después de cambiar la contraseña deberá iniciar sesión de nuevo con su "
@@ -163,7 +163,7 @@ async def send_password_reset_email(
         "verificación en dos pasos.\n\n"
         "Si usted no solicitó este cambio, ignore este mensaje. Su contraseña "
         "actual sigue siendo válida.\n\n"
-        "— ContigoCare"
+        "— karai.health"
     )
 
     html_body = f"""\
@@ -174,7 +174,7 @@ async def send_password_reset_email(
       <p style="margin:0 0 20px;font-size:15px;line-height:1.6;">{greeting}</p>
       <p style="margin:0 0 20px;font-size:15px;line-height:1.6;">
         Recibimos una solicitud para restablecer la contraseña de su cuenta en la
-        consola de ContigoCare.
+        consola de karai.health.
       </p>
       <p style="margin:0 0 24px;">
         <a href="{reset_url}"
@@ -202,7 +202,7 @@ async def send_password_reset_email(
 
     return await send_email(
         to_address,
-        "Restablecer su contraseña — ContigoCare",
+        "Restablecer su contraseña — karai.health",
         text_body,
         html_body,
     )

@@ -20,7 +20,6 @@ from app.schemas.insurance import (
     DashboardResponse,
     ExtractResponse,
     FeedbackRequest,
-    Severidad,
 )
 
 __all__ = [
@@ -40,6 +39,5 @@ __all__ = [
     "LoginRequest",
     "MfaVerifyRequest",
     "RecoveryLoginRequest",
-    "Severidad",
     "SessionResponse",
 ]

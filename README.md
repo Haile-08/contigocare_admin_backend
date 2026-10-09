@@ -1,4 +1,4 @@
-# ContigoCare Admin — Insurance Analysis API
+# karai.health Admin — Insurance Analysis API
 
 An internal tool for analysing **Mexican Gastos Médicos Mayores (GMM)**
 insurance policies. An operator uploads a policy, confirms which personal data
@@ -53,7 +53,7 @@ There is no registration endpoint. Accounts are created directly:
 
 ```bash
 uv run python scripts/create_admin.py create \
-  --email ops@contigo.care --name "Ana Ruiz"
+  --email ops@karai.health --name "Ana Ruiz"
 ```
 
 The new account has no authenticator. On first sign-in the console shows a QR
@@ -160,8 +160,13 @@ knowing:
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `GEMINI_MODEL` | `gemini-3.5-flash` | Paired with `GEMINI_FALLBACK_MODEL` (`gemini-3.5-flash-lite`). One-line switch, but run the eval loop after changing it. |
-| `ANALYSIS_PROMPT_VERSION` | `v1` | Selects `app/core/prompts/extraction_<v>.md` and its `critique_<v>.md`. Stored on every run. Change it to ship a new prompt; change it back to roll one back. Startup refuses a version whose files are not on disk, so this and the repository cannot drift apart unnoticed. `v1` organises the extraction into the seven categories a broker reads a policy in, and adds the CNSF registration, the internal sublimits, age limits, tenure portability, and the renewal, agravación and cancellation clauses. |
+| `GEMINI_MODEL` | `gemini-3.8-flash` | Paired with `GEMINI_FALLBACK_MODEL` (`gemini-3.7-flash`), which also backs every navigation agent. One-line switch, but run the eval loop after changing it. |
+| `ANALYSIS_PROMPT_VERSION` | `v3` | Selects `app/core/prompts/extraction_<v>.md` and its `critique_<v>.md`. Stored on every run. Change it to ship a new prompt; change it back to roll one back. Startup refuses a version whose files are not on disk, so this and the repository cannot drift apart unnoticed. `v3` extracts only what the navigation intake is prefilled from — insurer, start of vigencia, deducible, coaseguro, tope de coaseguro and antigüedad — plus a Spanish/English summary. The navigator's own parser reads everything else from the redacted policy. |
+| `NAVIGATION_ENABLED` | `true` | InnovaDerm Navigator: the handover's parser and five agents, run in the background on a stored analysis's redacted policy, producing its summary, coordinator PDF report and broker kit (ZIP). Each finished navigation takes reviewer feedback. |
+| `NAVIGATION_PROMPT_VERSION` | `innovaderm-v2` | A label stamped on every run. The prompts are the handover's, inline in `app/core/navigator/*_agent.py`. |
+| `AGENT_MODEL_*` | see notes | One per agent, following the handover's Sonnet/Opus split: `PARSER` and `ADHERENCE` on `gemini-3.8-flash`; `PLANNER`, `NOTIFICATION`, `OPTIMIZER` and `ADVOCATE` on `gemini-3.1-pro-preview`. Pro requires a paid-tier key. |
+| `NAVIGATION_CALL_TIMEOUT_SECONDS` / `NAVIGATION_CALL_BUDGET_SECONDS` | `150` / `300` | Per-attempt and per-call caps for navigation agents, longer than the analysis's `GEMINI_TIMEOUT_SECONDS` / `GEMINI_CALL_BUDGET_SECONDS` because Pro thinks for longer; under the analysis caps a Pro call would time out onto the fallback. |
+| `NAVIGATION_TIMEOUT_SECONDS` | `1800` | Bounds the whole background pipeline; the agents run one after another, as in InnovaDerm. Six calls at the full call budget. |
 | `ANALYSIS_SELF_CRITIQUE_ENABLED` | `true` | The repair pass. Roughly doubles cost on documents that need it. |
 | `REDACTION_ENFORCE_ON_SUBMIT` | `true` | The server-side gate. Turn off only with a very good reason. |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `15` | The token lives in memory, so this is the XSS blast radius. |

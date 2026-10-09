@@ -18,6 +18,7 @@ from slowapi.errors import RateLimitExceeded
 from asgi_correlation_id import CorrelationIdMiddleware
 
 from app.api.v1.api import api_router
+from app.api.v1.navigation import cancel_running_navigations
 from app.core.cache import cache_service
 from app.core.config import settings
 from app.core.limiter import limiter
@@ -47,6 +48,8 @@ async def lifespan(app: FastAPI):
         api_prefix=settings.API_V1_STR,
         model=settings.GEMINI_MODEL,
         prompt_version=settings.ANALYSIS_PROMPT_VERSION,
+        navigation_enabled=settings.NAVIGATION_ENABLED,
+        navigation_prompt_version=settings.NAVIGATION_PROMPT_VERSION,
     )
 
     try:
@@ -74,7 +77,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("refresh_token_purge_failed", error=str(e))
 
+    # A navigation runs in the process that started it. Any still marked
+    # running belonged to a process that is gone, and would be polled forever.
+    try:
+        interrupted = await database_service.fail_interrupted_navigations()
+        if interrupted:
+            logger.warning("interrupted_navigations_failed", count=interrupted)
+    except Exception as e:
+        logger.warning("interrupted_navigation_sweep_failed", error=str(e))
+
     yield
+
+    await cancel_running_navigations()
 
     await cache_service.close()
     await database_service.close()
